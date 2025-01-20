@@ -1,88 +1,56 @@
-# BrAIbrook
-# README.md
-# Manuscript Transcriber
+# BrAIBrook
 
-An iterative transcription system combining DeepSeek's vision capabilities with Kraken's specialized HTR for historical documents.
+An iterative transcription system combining DeepSeek's vision capabilities with Kraken's specialized HTR (Handwritten Text Recognition) for historical documents.
 
-## Installation
+## Setup
 
+1. Create and activate virtual environment:
 ```bash
-# Create and activate virtual environment
 python3 -m venv kraken_env
 source kraken_env/bin/activate
+```
 
-# Install dependencies
-pip install -r requirements.txt
+2. Install dependencies:
+```bash
+pip install "kraken[pdf,test,serve]"
 ```
 
 ## Project Structure
 
-- `src/`: Source code for the transcription system
-  - `input_processing/`: Document analysis and preprocessing
-  - `transcription/`: Kraken HTR integration and processing
-  - `verification/`: Content review and refinement
-  - `output/`: Text generation and metadata handling
-- `tests/`: Unit tests and integration tests
-- `models/`: Trained models and model configurations
-- `data/`: Input and output data
-- `docs/`: Documentation and guides
+```
+BrAIBrook/
+├── data/
+│   └── raw/         # Original manuscript images
+├── models/          # Downloaded Kraken models
+└── output/          # Processing outputs (binarized images, OCR results)
+```
 
-## Usage
+## Current Workflow
 
-[Usage instructions will go here]
+1. Download the comprehensive medieval model (8th-16th century):
+```bash
+kraken get 10.5281/zenodo.7631619
+```
+This downloads `cremma-generic-1.0.1.mlmodel`
 
-## Development
+2. Process a manuscript page (example with test_page.jpg):
+```bash
+# Binarize the image
+kraken -i data/raw/test_page.jpg output/test_page_bw.png binarize
 
-[Development instructions will go here]
+# Segment and perform OCR in one step with hOCR output
+kraken -h -i output/test_page_bw.png output/test_page.hocr segment ocr -m cremma-generic-1.0.1.mlmodel
+```
 
----
+3. View results:
+```bash
+# Copy hOCR to HTML for browser viewing
+cp output/test_page.hocr output/test_page.html
+```
+Then open test_page.html in your web browser to view the transcription with positioning information.
 
-# .gitignore
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+## Notes
 
-# Virtual Environment
-kraken_env/
-venv/
-ENV/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Project specific
-data/raw/*
-data/processed/*
-models/kraken/*
-models/deepseek/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!models/kraken/.gitkeep
-!models/deepseek/.gitkeep
-
-# OS specific
-.DS_Store
-.AppleDouble
-.LSOverride
+- Current implementation uses the comprehensive medieval model which covers 8th-16th century manuscripts
+- The model is trained on data from GalliCorpora, CREMMA Medieval, and other relevant sources
+- hOCR output format provides both transcribed text and positioning information
