@@ -69,30 +69,64 @@ class TranscriptionError(Exception):
     pass
 
 def extract_json_from_response(text: str) -> Dict:
-    """Extract and validate JSON from model response."""
+    """Extract and validate JSON from model response, handling nested JSON in code blocks."""
     try:
-        start_idx = text.find('{')
-        end_idx = text.rfind('}') + 1
-        if start_idx >= 0 and end_idx > start_idx:
-            json_str = text[start_idx:end_idx]
-            return json.loads(json_str)
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse JSON response: {text[:200]}...")
+        # First see if we have valid JSON in a code block
+        code_block_pattern = r"```(?:json)?\n(.*?)\n```"
+        import re
+        matches = re.findall(code_block_pattern, text, re.DOTALL)
+        if matches:
+            # Try each code block
+            for block in matches:
+                try:
+                    parsed = json.loads(block)
+                    if all(key in parsed for key in ['transcription', 'revised_transcription', 'summary']):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+        
+        # If no valid JSON in code blocks, try parsing the whole text
+        try:
+            parsed = json.loads(text)
+            # If it has our expected structure, return it
+            if all(key in parsed for key in ['transcription', 'revised_transcription', 'summary']):
+                return parsed
+            # If it contains code blocks in transcription/revised_transcription, parse those
+            if isinstance(parsed.get('transcription'), str) and '```json' in parsed['transcription']:
+                inner_matches = re.findall(code_block_pattern, parsed['transcription'], re.DOTALL)
+                if inner_matches:
+                    try:
+                        inner = json.loads(inner_matches[0])
+                        if all(key in inner for key in ['transcription', 'revised_transcription', 'summary']):
+                            return inner
+                    except json.JSONDecodeError:
+                        pass
+        except json.JSONDecodeError:
+            pass
+            
+    except Exception as e:
+        logger.warning(f"Failed to parse JSON response: {str(e)}")
     
+    # If we get here, create a default response
     return {
         'transcription': '',
         'revised_transcription': '',
-        'summary': 'Failed to parse response',
+        'summary': text if len(text) < 1000 else text[:1000] + '...',
         'keywords': [],
         'marginalia': [],
         'confidence': 0,
-        'transcription_notes': 'Failed to parse response',
-        'content_notes': 'Failed to extract valid JSON response'
+        'transcription_notes': 'Failed to parse JSON response',
+        'content_notes': 'Original response preserved in summary field'
     }
 
 def format_malformed_response(text: str, model: genai.GenerativeModel) -> Dict:
     """Attempt to format malformed response using Gemini Pro."""
-    prompt = f"""Format this transcription response as valid JSON with this structure:
+    # First check if we actually have valid JSON in code blocks
+    formatted = extract_json_from_response(text)
+    if formatted.get('transcription') and formatted.get('transcription') != text:
+        return formatted
+        
+    prompt = f"""Format this transcription response as valid JSON with this structure, outputting nothing but the correct json:
     {{
         "transcription": "initial transcription with markup",
         "revised_transcription": "refined version after context review",
@@ -121,22 +155,23 @@ def format_malformed_response(text: str, model: genai.GenerativeModel) -> Dict:
         )
         
         formatted = extract_json_from_response(response.text)
-        if not formatted.get('transcription'):
-            raise TranscriptionError("Failed to format response")
-        return formatted
-        
+        if formatted.get('transcription') and formatted.get('transcription') != text:
+            return formatted
+            
     except Exception as e:
         logger.error(f"Failed to format response: {str(e)}")
-        return {
-            'transcription': text,
-            'revised_transcription': text,
-            'summary': 'Automatic formatting failed',
-            'keywords': [],
-            'marginalia': [],
-            'confidence': 0,
-            'transcription_notes': f'Failed to format response: {str(e)}',
-            'content_notes': 'Original unformatted response preserved in transcription field'
-        }
+    
+    # If all else fails, return a basic structure with the original text
+    return {
+        'transcription': text,
+        'revised_transcription': text,
+        'summary': 'Automatic formatting failed',
+        'keywords': [],
+        'marginalia': [],
+        'confidence': 0,
+        'transcription_notes': f'Failed to format response',
+        'content_notes': 'Original response preserved in transcription field'
+    }
     
 class ManuscriptProcessor:
     """Handles the processing of manuscript pages with rate limiting."""
@@ -166,36 +201,58 @@ class ManuscriptProcessor:
         Previous Content: {previous_page['revised_transcription'] if previous_page else 'Not available'}
         Following Content: {next_page['transcription'] if next_page else 'Not available'}
 
-        TRANSCRIPTION GUIDELINES:
-        1. Main Text:
-           - Preserve original line breaks with |
-           - Mark paragraph breaks with ||
-           - Use [brackets] for uncertain readings
-           - Use <angle brackets> for editorial additions
-           - Mark illegible text with {{...}}
+        PAGE ANALYSIS GUIDELINES:
+        1. For Non-Text Pages:
+        - Bindings, covers, blank pages: Provide descriptive summary only
+        - Modern additions (bookplates, labels): Note presence and content
+        - Decorative elements: Describe without transcription
+        - Leave transcription and revised_transcription fields empty for these cases
 
-        2. Marginalia:
-           - Start each entry with specific location
-           - Note contemporary vs. later additions
-           - Include both text and visual elements
+        2. For Pages with Text:
+        Main Text Transcription:
+        - Preserve original line breaks with |
+        - Mark paragraph breaks with ||
+        - Use [brackets] for uncertain readings
+        - Use <angle brackets> for editorial additions
+        - Mark illegible text with {{...}}
+        - The initial transcript should focus on faithfully recording the letters as best as possible in their immediate context
+        - Changes made based on meaning and context should go in the revised transcript
 
-        3. Process:
-           - Initial careful reading
-           - Document uncertain sections
-           - Compare with context
-           - Refine readings
-           - Note remaining uncertainties
+        3. Keywords and Summary Purpose:
+        Keywords are used to:
+        - Enable search across the manuscript collection
+        - Identify distinctive elements of THIS page
+        - Support topic analysis and page retrieval
+        - Focus on what makes this page unique within the manuscript
+        Include: specific names, places, events, unique decorative elements, 
+        dates, and concepts central to this page's content
+        Avoid: features common across the manuscript (script type, material, general topic)
+
+        Summary serves to:
+        - Guide future translation efforts
+        - Explain page-specific context and references
+        - Track narrative or argumentative development
+        - Connect to surrounding pages
+        Keep summaries clear, specific, and focused on content unique to this page.
+
+        4. Analysis Process:
+        - First determine if page requires transcription
+        - For text pages: perform careful reading, document uncertainties
+        - For non-text pages: focus on description and context
+        - Compare with surrounding context when relevant
+        - Note any special features or conditions
+        - Transcript revisions should be more conservative when the text is clearer
 
         Return ONLY a JSON object with this structure:
         {{
-            "transcription": "initial transcription with markup",
-            "revised_transcription": "refined version after context review",
-            "summary": "brief content description",
-            "keywords": ["theme1", "theme2", "subject1"],
+            "transcription": "initial transcription with markup (empty string for non-text pages)",
+            "revised_transcription": "refined version after context review (empty string for non-text pages)",
+            "summary": "brief description following the guidelines above",
+            "keywords": ["terms following the purpose guidelines above"],
             "marginalia": ["location: content"],
             "confidence": number (0-100),
-            "transcription_notes": "challenges and resolutions",
-            "content_notes": "scholarly observations"
+            "transcription_notes": "challenges and resolutions, or description of non-text elements",
+            "content_notes": "scholarly observations and contextual information"
         }}"""
     
     def process_page(self, image_path: str, metadata: Dict, page_number: int,
@@ -210,9 +267,9 @@ class ManuscriptProcessor:
                 image = Image.open(image_path)
                 prompt = self._construct_prompt(metadata, page_number, previous_page, next_page)
                 
-                response = self.vision_model.generate_content(
+                response = self.model.generate_content(
                     [prompt, image],
-                    generation_config={"temperature": 0.2},
+                    # generation_config={"temperature": 0.2},
                     safety_settings={
                         genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
                         genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
@@ -223,10 +280,10 @@ class ManuscriptProcessor:
                 
                 result = extract_json_from_response(response.text)
                 
-                # If JSON parsing failed, try to format with text model
-                if not result.get('transcription'):
-                    self.rate_limiter.wait_if_needed()
-                    result = format_malformed_response(response.text, self.text_model)
+                # # If JSON parsing failed, try to format with text model
+                # if not result.get('transcription'):
+                #     self.rate_limiter.wait_if_needed()
+                #     result = format_malformed_response(response.text, self.model)
                 
                 result['page_number'] = page_number
                 return result
