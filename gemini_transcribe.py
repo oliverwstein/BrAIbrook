@@ -217,6 +217,7 @@ class ManuscriptProcessor:
         - Mark illegible text with {{...}}
         - The initial transcript should focus on faithfully recording the letters as best as possible in their immediate context
         - Changes made based on meaning and context should go in the revised transcript
+        - e.x.: ſ in the initial transcript, but 's' in the revised one.
 
         3. Keywords and Summary Purpose:
         Keywords are used to:
