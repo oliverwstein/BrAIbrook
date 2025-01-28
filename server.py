@@ -1,9 +1,11 @@
+from datetime import datetime
 from flask import Flask, jsonify, send_file, redirect, url_for
 import os
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import logging
+from threading import Thread
 
 # Set up logging to be more visible
 logging.basicConfig(
@@ -25,16 +27,9 @@ class ManuscriptServer:
     def __init__(self, raw_dir: str = "data/raw", transcripts_dir: str = "data/transcripts"):
         logger.info("Starting ManuscriptServer initialization...")
         
-        # Convert to absolute paths for clarity in logging
         self.raw_dir = Path(raw_dir).absolute()
         self.transcripts_dir = Path(transcripts_dir).absolute()
-        self.manuscript_map = {}
-        self.transcriptions = {}
         
-        logger.info(f"Raw directory path: {self.raw_dir}")
-        logger.info(f"Transcripts directory path: {self.transcripts_dir}")
-        
-        # Check if directories exist
         if not self.raw_dir.exists():
             logger.error(f"Raw directory does not exist: {self.raw_dir}")
             raise FileNotFoundError(f"Raw directory not found: {self.raw_dir}")
@@ -42,125 +37,196 @@ class ManuscriptServer:
             logger.error(f"Transcripts directory does not exist: {self.transcripts_dir}")
             raise FileNotFoundError(f"Transcripts directory not found: {self.transcripts_dir}")
             
-        self._initialize_manuscript_map()
-
-    def _initialize_manuscript_map(self) -> None:
-        """Create mapping between manuscript titles and their data locations."""
-        logger.info("Starting manuscript map initialization...")
-        
-        # List all transcription.json files
-        transcript_files = list(self.transcripts_dir.glob("*/transcription.json"))
-        logger.info(f"Found {len(transcript_files)} potential transcript files")
-        
-        for transcript_file in transcript_files:
+        # Initialize unified manuscript tracking
+        self.manuscripts = self._initialize_manuscripts()
+        self.transcription_status = {}  # Track ongoing transcriptions
+    
+    def start_transcription(self, title: str, manuscript_folder: Path) -> None:
+        """Run transcription in a background thread."""
+        def transcribe():
             try:
-                logger.info(f"Processing transcript file: {transcript_file}")
-                with open(transcript_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    manuscript_title = data.get('manuscript_title')
-                    record_id = data.get('metadata', {}).get('Record ID')
-                    
-                    logger.info(f"Found manuscript title: {manuscript_title}, record ID: {record_id}")
-                    
-                    if manuscript_title and record_id:
-                        raw_folder = self.raw_dir / f"34-{record_id}"
-                        logger.info(f"Looking for raw folder: {raw_folder}")
-                        
-                        if raw_folder.exists():
-                            self.manuscript_map[manuscript_title] = {
-                                'record_id': record_id,
-                                'transcript_file': transcript_file,
-                                'raw_folder': raw_folder
-                            }
-                            logger.info(f"Successfully mapped manuscript: {manuscript_title}")
-                        else:
-                            logger.warning(f"Raw folder not found: {raw_folder}")
-                    else:
-                        logger.warning(f"Missing title or record ID in {transcript_file}")
-            except Exception as e:
-                logger.error(f"Error processing {transcript_file}: {e}")
-
-        logger.info(f"Manuscript map initialization complete. Found {len(self.manuscript_map)} manuscripts:")
-        for title, info in self.manuscript_map.items():
-            logger.info(f"- {title} (Record ID: {info['record_id']})")
-
-    def _load_transcription(self, manuscript_title: str) -> Optional[Dict]:
-        """Load transcription data for a manuscript if not already cached."""
-        if manuscript_title not in self.manuscript_map:
-            logger.warning(f"Manuscript not found: {manuscript_title}")
-            return None
-            
-        if manuscript_title not in self.transcriptions:
-            try:
-                transcript_file = self.manuscript_map[manuscript_title]['transcript_file']
-                logger.info(f"Loading transcription from {transcript_file}")
-                with open(transcript_file, 'r', encoding='utf-8') as f:
-                    self.transcriptions[manuscript_title] = json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading transcription for {manuscript_title}: {e}")
-                return None
+                from gemini_transcribe import ManuscriptProcessor, process_manuscript
+                processor = ManuscriptProcessor()
                 
-        return self.transcriptions[manuscript_title]
-
-    def get_page_data(self, manuscript_title: str, page_number: int) -> Tuple[Optional[Dict], Optional[str]]:
-        """Get transcription data and image path for a specific page."""
-        logger.info(f"Retrieving page {page_number} for manuscript: {manuscript_title}")
+                # Update status to in_progress
+                self.transcription_status[title] = {'status': 'in_progress', 'started_at': datetime.now().isoformat()}
+                
+                # Process manuscript
+                result = process_manuscript(
+                    str(manuscript_folder),
+                    str(self.transcripts_dir),
+                    processor
+                )
+                
+                if result:
+                    # Create transcript file path
+                    transcript_file = self.transcripts_dir / result['manuscript_title'] / 'transcription.json'
+                    
+                    # Update manuscript tracking
+                    self.manuscripts[title].update({
+                        'transcribed': True,
+                        'transcript_file': transcript_file,
+                        'transcription_info': {
+                            'successful_pages': result['successful_pages'],
+                            'failed_pages': result.get('failed_pages', []),
+                            'last_updated': datetime.now().isoformat()
+                        }
+                    })
+                    
+                    # Load transcription data
+                    with open(transcript_file, 'r', encoding='utf-8') as f:
+                        transcription_data = json.load(f)
+                        self.manuscripts[title]['transcription_data'] = transcription_data
+                    
+                    # Update status to completed
+                    self.transcription_status[title] = {
+                        'status': 'completed',
+                        'completed_at': datetime.now().isoformat(),
+                        'successful_pages': result['successful_pages'],
+                        'failed_pages': result.get('failed_pages', [])
+                    }
+                else:
+                    self.transcription_status[title] = {
+                        'status': 'failed',
+                        'error': 'Transcription returned no results',
+                        'failed_at': datetime.now().isoformat()
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Transcription failed: {str(e)}")
+                self.transcription_status[title] = {
+                    'status': 'failed',
+                    'error': str(e),
+                    'failed_at': datetime.now().isoformat()
+                }
         
-        transcription = self._load_transcription(manuscript_title)
-        if not transcription:
-            return None, None
+        # Start transcription in background thread
+        Thread(target=transcribe, daemon=True).start()
 
-        try:
-            page_idx = page_number - 1
-            if page_idx < 0 or page_idx >= len(transcription['pages']):
-                logger.warning(f"Page {page_number} out of range for {manuscript_title}")
-                return None, None
+    def _initialize_manuscripts(self) -> Dict[str, Dict]:
+        """Create unified mapping of all manuscripts with their status and data locations."""
+        logger.info("Starting unified manuscript initialization...")
+        manuscripts = {}
+
+        # First, scan raw directory for all manuscripts
+        for folder in self.raw_dir.iterdir():
+            if not folder.is_dir():
+                continue
+
+            try:
+                metadata_file = folder / 'metadata.json'
+                if not metadata_file.exists():
+                    continue
+
+                # Load metadata
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
                 
-            page_data = transcription['pages'][page_idx]
-            
-            raw_folder = self.manuscript_map[manuscript_title]['raw_folder']
-            image_files = sorted([f for f in raw_folder.iterdir() 
-                                if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}])
-            
-            if page_idx < len(image_files):
-                logger.info(f"Found image for page {page_number}: {image_files[page_idx]}")
-                return page_data, str(image_files[page_idx])
-            
-            logger.warning(f"No image found for page {page_number}")
-            return page_data, None
-            
-        except Exception as e:
-            logger.error(f"Error getting page data for {manuscript_title}, page {page_number}: {e}")
-            return None, None
+                title = metadata.get('Title')
+                record_id = metadata.get('Record ID')
 
-    def get_manuscript_info(self, manuscript_title: str) -> Optional[Dict]:
-        """Get basic information about a manuscript."""
-        transcription = self._load_transcription(manuscript_title)
-        if not transcription:
-            return None
-            
-        return {
-            'title': transcription['manuscript_title'],
-            'metadata': transcription['metadata'],
-            'total_pages': transcription['total_pages'],
-            'successful_pages': transcription['successful_pages'],
-            'failed_pages': transcription.get('failed_pages', [])
-        }
+                if not title or not record_id:
+                    logger.warning(f"Missing title or record ID in {folder}")
+                    continue
+
+                # Count images
+                image_files = sorted([f for f in folder.iterdir() 
+                                   if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}])
+
+                # Initialize basic manuscript info
+                manuscripts[title] = {
+                    'record_id': record_id,
+                    'metadata': metadata,
+                    'raw_folder': folder,
+                    'total_pages': len(image_files),
+                    'transcribed': False,
+                    'transcription_info': None
+                }
+                
+            except Exception as e:
+                logger.error(f"Error processing raw folder {folder}: {e}")
+
+        # Then, scan transcripts directory and update transcription status
+        for transcript_file in self.transcripts_dir.glob("*/transcription.json"):
+            try:
+                with open(transcript_file, 'r', encoding='utf-8') as f:
+                    transcription_data = json.load(f)
+                
+                title = transcription_data.get('manuscript_title')
+                if not title or title not in manuscripts:
+                    continue
+
+                manuscripts[title].update({
+                    'transcribed': True,
+                    'transcript_file': transcript_file,
+                    'transcription_info': {
+                        'successful_pages': transcription_data.get('successful_pages', 0),
+                        'failed_pages': transcription_data.get('failed_pages', []),
+                        'last_updated': transcription_data.get('last_updated', None)
+                    }
+                })
+
+            except Exception as e:
+                logger.error(f"Error processing transcript file {transcript_file}: {e}")
+
+        logger.info(f"Manuscript initialization complete. Found {len(manuscripts)} manuscripts")
+        return manuscripts
 
     def list_manuscripts(self) -> list:
-        """Get a list of all available manuscripts."""
-        manuscripts = []
-        for title in self.manuscript_map:
-            info = self.get_manuscript_info(title)
-            if info:
-                manuscripts.append({
-                    'title': title,
-                    'record_id': self.manuscript_map[title]['record_id'],
-                    'total_pages': info['total_pages'],
-                    'successful_pages': info['successful_pages'],
-                    'failed_pages': info['failed_pages']
-                })
-        return manuscripts
+        """Get a list of all manuscripts with their status."""
+        return [{
+            'title': title,
+            'record_id': info['record_id'],
+            'total_pages': info['total_pages'],
+            'transcribed': info['transcribed'],
+            'transcription_status': {
+                'successful_pages': info['transcription_info']['successful_pages'],
+                'failed_pages': info['transcription_info']['failed_pages'],
+                'last_updated': info['transcription_info']['last_updated']
+            } if info['transcribed'] else None
+        } for title, info in self.manuscripts.items()]
+
+    def get_manuscript_info(self, title: str) -> Optional[Dict]:
+        """Get detailed information about a manuscript."""
+        if title not in self.manuscripts:
+            return None
+        
+        info = self.manuscripts[title]
+        return {
+            'title': title,
+            'record_id': info['record_id'],
+            'metadata': info['metadata'],
+            'total_pages': info['total_pages'],
+            'transcribed': info['transcribed'],
+            'transcription_info': info['transcription_info']
+        }
+
+    def get_page_data(self, title: str, page_number: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """Get transcription data and image path for a specific page."""
+        if title not in self.manuscripts:
+            return None, None
+
+        info = self.manuscripts[title]
+        page_idx = page_number - 1
+
+        # Get image path
+        image_files = sorted([f for f in info['raw_folder'].iterdir() 
+                            if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}])
+        
+        image_path = str(image_files[page_idx]) if page_idx < len(image_files) else None
+
+        # Get transcription data if available
+        page_data = None
+        if info['transcribed']:
+            try:
+                with open(info['transcript_file'], 'r', encoding='utf-8') as f:
+                    transcription = json.load(f)
+                if page_idx < len(transcription['pages']):
+                    page_data = transcription['pages'][page_idx]
+            except Exception as e:
+                logger.error(f"Error loading transcription data: {e}")
+
+        return page_data, image_path
 
 # Initialize server
 try:
@@ -189,7 +255,7 @@ def index():
 
 @app.route('/manuscripts', methods=['GET'])
 def list_manuscripts():
-    """List all available manuscripts with basic information."""
+    """List all manuscripts with their transcription status."""
     logger.info("Handling /manuscripts request")
     return jsonify(manuscript_server.list_manuscripts())
 
@@ -219,6 +285,54 @@ def get_page_image(title, page):
     if image_path:
         return send_file(image_path)
     return jsonify({'error': 'Image not found'}), 404
+
+@app.route('/manuscripts/<path:title>/transcribe', methods=['POST'])
+def transcribe_manuscript(title):
+    """Start transcription of a specific manuscript."""
+    logger.info(f"Handling transcribe request for {title}")
+    
+    info = manuscript_server.get_manuscript_info(title)
+    if not info:
+        return jsonify({'error': 'Manuscript not found'}), 404
+
+    # Check if transcription is complete by comparing page counts
+    if info.get('transcription_info'):
+        successful_pages = info['transcription_info'].get('successful_pages', 0)
+        total_pages = info['total_pages']
+        
+        if successful_pages == total_pages:
+            return jsonify({
+                'status': 'complete',
+                'message': f'Manuscript already fully transcribed ({successful_pages}/{total_pages} pages)'
+            }), 400
+    
+    # Check if transcription is already in progress
+    if title in manuscript_server.transcription_status:
+        status = manuscript_server.transcription_status[title]['status']
+        if status == 'in_progress':
+            current_progress = manuscript_server.transcription_status[title].get('current_page', 0)
+            return jsonify({
+                'status': 'in_progress',
+                'message': f'Transcription already in progress (page {current_progress + 1}/{info["total_pages"]})'
+            })
+    
+    # Start transcription in background
+    manuscript_folder = manuscript_server.manuscripts[title]['raw_folder']
+    manuscript_server.start_transcription(title, manuscript_folder)
+    
+    return jsonify({
+        'status': 'started',
+        'message': f'Starting transcription of {info["total_pages"]} pages'
+    })
+
+# Add status check endpoint
+@app.route('/manuscripts/<path:title>/transcribe/status', methods=['GET'])
+def transcription_status(title):
+    """Get the status of an ongoing or completed transcription."""
+    if title not in manuscript_server.transcription_status:
+        return jsonify({'status': 'not_started'})
+    
+    return jsonify(manuscript_server.transcription_status[title])
 
 if __name__ == '__main__':
     logger.info("Starting Flask server...")
