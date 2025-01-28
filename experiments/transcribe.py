@@ -2,10 +2,7 @@ import os
 import argparse
 import subprocess
 from pathlib import Path
-
-def ensure_directory(directory):
-    """Create directory if it doesn't exist."""
-    Path(directory).mkdir(parents=True, exist_ok=True)
+import tempfile
 
 def run_kraken_command(command):
     """Execute a kraken command and handle errors."""
@@ -18,49 +15,52 @@ def run_kraken_command(command):
         return False
 
 def process_image(input_path, output_dir, model_path):
-    """Process an image through Kraken workflow."""
-    # Create output directory structure
-    ensure_directory(output_dir)
+    """Process an image through Kraken workflow without saving binarized image."""
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
     
     # Construct file paths
     input_filename = Path(input_path).stem
-    bw_image = os.path.join(output_dir, f"{input_filename}_bw.png")
     hocr_output = os.path.join(output_dir, f"{input_filename}.hocr")
     json_output = os.path.join(output_dir, f"{input_filename}.json")
     
-    # Binarize image
-    binarize_cmd = [
-        "kraken", 
-        "-i", input_path, bw_image,
-        "binarize"
-    ]
-    
-    if not run_kraken_command(binarize_cmd):
-        return False
-    
-    # Generate hOCR output
-    hocr_cmd = [
-        "kraken",
-        "-h",
-        "-i", bw_image, hocr_output,
-        "segment", "ocr",
-        "-m", model_path
-    ]
-    
-    if not run_kraken_command(hocr_cmd):
-        return False
-    
-    # Generate JSON output
-    json_cmd = [
-        "kraken",
-        "-n",
-        "-i", bw_image, json_output,
-        "segment", "ocr",
-        "-m", model_path
-    ]
-    
-    if not run_kraken_command(json_cmd):
-        return False
+    # Use a temporary directory for binarized image
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bw_image = os.path.join(temp_dir, f"{input_filename}_bw.png")
+        
+        # Binarize image
+        binarize_cmd = [
+            "kraken", 
+            "-i", input_path, bw_image,
+            "binarize"
+        ]
+        
+        if not run_kraken_command(binarize_cmd):
+            return False
+        
+        # Generate hOCR output
+        hocr_cmd = [
+            "kraken",
+            "-h",
+            "-i", bw_image, hocr_output,
+            "segment", "ocr",
+            "-m", model_path
+        ]
+        
+        if not run_kraken_command(hocr_cmd):
+            return False
+        
+        # Generate JSON output
+        json_cmd = [
+            "kraken",
+            "-n",
+            "-i", bw_image, json_output,
+            "segment", "ocr",
+            "-m", model_path
+        ]
+        
+        if not run_kraken_command(json_cmd):
+            return False
     
     return True
 
