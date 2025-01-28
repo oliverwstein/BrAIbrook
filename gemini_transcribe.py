@@ -313,7 +313,7 @@ class ManuscriptProcessor:
 
 def process_manuscript(manuscript_path: str, output_dir: str,
                       processor: ManuscriptProcessor) -> Optional[Dict]:
-    """Process all pages in a manuscript directory."""
+    """Process all pages in a manuscript directory, reusing existing successful transcriptions."""
     try:
         # Load metadata
         metadata_path = os.path.join(manuscript_path, 'metadata.json')
@@ -334,8 +334,19 @@ def process_manuscript(manuscript_path: str, output_dir: str,
         manuscript_output_dir = os.path.join(output_dir, safe_title)
         os.makedirs(manuscript_output_dir, exist_ok=True)
         
-        # Initialize results
-        results = {
+        # Check for existing transcription
+        output_path = os.path.join(manuscript_output_dir, 'transcription.json')
+        existing_results = None
+        if os.path.exists(output_path):
+            try:
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    existing_results = json.load(f)
+                logger.info(f"Found existing transcription with {len(existing_results.get('pages', []))} pages")
+            except Exception as e:
+                logger.error(f"Error loading existing transcription: {e}")
+        
+        # Initialize results, using existing data if available
+        results = existing_results if existing_results else {
             'manuscript_title': manuscript_title,
             'metadata': metadata,
             'pages': [],
@@ -349,18 +360,26 @@ def process_manuscript(manuscript_path: str, output_dir: str,
             idx = 0
             while idx < len(image_files):
                 try:
-                    # Get context
-                    previous_page = results['pages'][idx-1] if idx > 0 else None
-                    next_page = None
+                    # Check if we have a valid existing transcription for this page
+                    existing_page = (results['pages'][idx] 
+                                   if idx < len(results['pages']) and 'error' not in results['pages'][idx] 
+                                   else None)
                     
-                    # Process page
-                    page_result = processor.process_page(
-                        os.path.join(manuscript_path, image_files[idx]),
-                        metadata,
-                        idx + 1,
-                        previous_page,
-                        next_page
-                    )
+                    if existing_page:
+                        page_result = existing_page
+                    else:
+                        # Get context
+                        previous_page = results['pages'][idx-1] if idx > 0 else None
+                        next_page = None
+                        
+                        # Process page
+                        page_result = processor.process_page(
+                            os.path.join(manuscript_path, image_files[idx]),
+                            metadata,
+                            idx + 1,
+                            previous_page,
+                            next_page
+                        )
                     
                     # Update results
                     if len(results['pages']) <= idx:
@@ -369,7 +388,8 @@ def process_manuscript(manuscript_path: str, output_dir: str,
                         results['pages'][idx] = page_result
                     
                     if 'error' not in page_result:
-                        results['successful_pages'] += 1
+                        if not existing_page:  # Only increment if this is a new success
+                            results['successful_pages'] += 1
                         pbar.set_postfix(successful=f"{results['successful_pages']}/{idx+1}")
                         idx += 1
                     else:
@@ -380,7 +400,6 @@ def process_manuscript(manuscript_path: str, output_dir: str,
                     pbar.update(1)
                     
                     # Save progress
-                    output_path = os.path.join(manuscript_output_dir, 'transcription.json')
                     with open(output_path, 'w', encoding='utf-8') as f:
                         json.dump(results, f, indent=2, ensure_ascii=False)
                     
@@ -395,7 +414,7 @@ def process_manuscript(manuscript_path: str, output_dir: str,
     except Exception as e:
         logger.error(f"Failed to process manuscript at {manuscript_path}: {e}")
         return None
-
+    
 def batch_process_manuscripts(
     input_dir: str = 'data/raw',
     output_dir: str = 'data/transcripts',
