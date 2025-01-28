@@ -33,7 +33,7 @@ wheels/
 *.swo
 
 # Project specific
-data/raw/*
+data/
 data/processed/*
 models/*
 !data/raw/.gitkeep
