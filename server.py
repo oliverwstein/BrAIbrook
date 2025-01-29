@@ -1,11 +1,14 @@
 from datetime import datetime
-from flask import Flask, jsonify, send_file, redirect, url_for
+from flask import Flask, jsonify, send_file, request
 import os
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import logging
 from threading import Thread
+from search import init_search_engine
+from threading import enumerate as enumerate_threads
+import psutil
 
 # Set up logging to be more visible
 logging.basicConfig(
@@ -40,6 +43,7 @@ class ManuscriptServer:
         # Initialize unified manuscript tracking
         self.manuscripts = self._initialize_manuscripts()
         self.transcription_status = {}  # Track ongoing transcriptions
+
     
     def start_transcription(self, title: str, manuscript_folder: Path) -> None:
         """Run transcription in a background thread."""
@@ -233,6 +237,10 @@ try:
     logger.info("Initializing ManuscriptServer...")
     manuscript_server = ManuscriptServer()
     logger.info("ManuscriptServer initialization complete")
+    logger.info("Initializing search engine...")
+    search_engine = init_search_engine()
+    search_engine.index_manuscripts(manuscript_server.manuscripts)
+    logger.info("Search engine initialization complete")
 except Exception as e:
     logger.error(f"Failed to initialize ManuscriptServer: {e}")
     raise
@@ -334,6 +342,164 @@ def transcription_status(title):
     
     return jsonify(manuscript_server.transcription_status[title])
 
+@app.route('/search', methods=['GET'])
+def search_manuscripts():
+    """Search manuscripts using keyword query."""
+    query = request.args.get('q', '')
+    num_results = int(request.args.get('limit', 10))
+    
+    if not query:
+        return jsonify({'error': 'No search query provided'}), 400
+        
+    search_engine = init_search_engine()
+    results = search_engine.search(query, num_results=num_results)
+    
+    return jsonify({
+        'query': query,
+        'num_results': len(results),
+        'results': results
+    })
+
+@app.route('/manuscripts/<path:title>/similar', methods=['GET'])
+def similar_manuscripts(title):
+    """Find manuscripts similar to a given one."""
+    num_results = int(request.args.get('limit', 5))
+    
+    search_engine = init_search_engine()
+    results = search_engine.get_similar_manuscripts(title, num_results=num_results)
+    
+    return jsonify({
+        'manuscript': title,
+        'num_similar': len(results),
+        'similar_manuscripts': results
+    })
+
+@app.route('/search/status', methods=['GET'])
+def search_status():
+    """Get current status of the search engine."""
+    search_engine = init_search_engine()
+    return jsonify(search_engine.get_status())
+
+@app.route('/system/threads', methods=['GET'])
+def get_thread_info():
+    """Get information about all threads in the application."""
+    current_process = psutil.Process()
+    
+    # Get system-wide thread limits
+    system_info = {
+        'cpu_count': psutil.cpu_count(logical=True),
+        'max_threads_soft_limit': None,
+        'max_threads_hard_limit': None
+    }
+    
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        system_info['max_threads_soft_limit'] = soft
+        system_info['max_threads_hard_limit'] = hard
+    except (ImportError, AttributeError):
+        # Windows or system doesn't support this
+        pass
+
+    # Get all threads for this process
+    threads_info = []
+    process_threads = current_process.threads()
+    python_threads = list(enumerate_threads())
+    
+    for thread in process_threads:
+        thread_data = {
+            'thread_id': thread.id,
+            'cpu_time_user': thread.user_time,
+            'cpu_time_system': thread.system_time,
+            'status': 'unknown'  # Default status
+        }
+        
+        # Try to match with Python thread objects for more info
+        for py_thread in python_threads:
+            if py_thread.ident == thread.id:
+                thread_data.update({
+                    'name': py_thread.name,
+                    'daemon': py_thread.daemon,
+                    'alive': py_thread.is_alive(),
+                    'status': 'alive' if py_thread.is_alive() else 'stopped'
+                })
+                
+                # Add info about transcription tasks if it's a transcription thread
+                if py_thread.name.startswith('Thread-') and manuscript_server.transcription_status:
+                    for title, status in manuscript_server.transcription_status.items():
+                        if status.get('status') == 'in_progress':
+                            thread_data['task'] = f"Transcribing: {title}"
+                            thread_data['progress'] = status.get('current_page', 0)
+                            break
+                break
+        
+        threads_info.append(thread_data)
+
+    return jsonify({
+        'system': system_info,
+        'process': {
+            'pid': current_process.pid,
+            'total_threads': len(threads_info),
+            'memory_usage': current_process.memory_info().rss / 1024 / 1024,  # MB
+            'cpu_percent': current_process.cpu_percent()
+        },
+        'threads': threads_info
+    })
+
+@app.route('/manuscripts/transcribe', methods=['POST'])
+def start_transcriptions():
+    """Start transcribing a specified number of untranscribed manuscripts."""
+    try:
+        # Get number of manuscripts to transcribe from request, default to 1
+        num_to_start = request.json.get('count', 1)
+        
+        # Get manuscripts that need transcription
+        manuscripts = manuscript_server.list_manuscripts()
+        to_transcribe = []
+        
+        for manuscript in manuscripts:
+            title = manuscript['title']
+            total_pages = manuscript['total_pages']
+            successful_pages = (manuscript.get('transcription_status', {}).get('successful_pages', 0) 
+                              if manuscript.get('transcription_status') else 0)
+            
+            # Add if needs transcription and not already in progress
+            if successful_pages < total_pages:
+                if (title not in manuscript_server.transcription_status or 
+                    manuscript_server.transcription_status[title].get('status') != 'in_progress'):
+                    to_transcribe.append({
+                        'title': title,
+                        'remaining_pages': total_pages - successful_pages
+                    })
+        
+        # Sort by remaining pages (descending)
+        to_transcribe.sort(key=lambda x: x['remaining_pages'], reverse=True)
+        
+        # Start requested number of transcriptions
+        started = []
+        for item in to_transcribe[:num_to_start]:
+            title = item['title']
+            try:
+                manuscript_folder = manuscript_server.manuscripts[title]['raw_folder']
+                manuscript_server.start_transcription(title, manuscript_folder)
+                started.append(title)
+                logger.info(f"Started transcription of {title} ({item['remaining_pages']} pages remaining)")
+            except Exception as e:
+                logger.error(f"Failed to start transcription for {title}: {e}")
+        
+        return jsonify({
+            'status': 'success',
+            'started': started,
+            'count': len(started),
+            'remaining_manuscripts': len(to_transcribe) - len(started)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+    
 if __name__ == '__main__':
     logger.info("Starting Flask server...")
     app.run(debug=True, host='127.0.0.1', port=5000)
