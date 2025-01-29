@@ -21,10 +21,10 @@ class RateLimiter:
     """Rate limiter for API requests respecting both per-minute and daily limits."""
     
     def __init__(self):
-        self.minute_limit = 15
-        self.day_limit = 1500
-        self.minute_tokens = 15
-        self.day_tokens = 1500
+        self.minute_limit = 150000
+        self.day_limit = 1500000000
+        self.minute_tokens = 15000000
+        self.day_tokens = 1500000000
         self.last_minute = datetime.now()
         self.last_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
