@@ -1,5 +1,6 @@
 from datetime import datetime
 from flask import Flask, jsonify, send_file, request
+from flask_cors import CORS  # Add this import
 import os
 import json
 from pathlib import Path
@@ -25,6 +26,25 @@ console_handler.setLevel(logging.INFO)
 logger.addHandler(console_handler)
 
 app = Flask(__name__)
+
+# Configure CORS
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:5173",    # Default Vite dev server
+            "http://127.0.0.1:5173",    # Alternative Vite dev server
+            "http://localhost:4173",    # Vite preview
+            "http://127.0.0.1:4173",    # Alternative Vite preview
+            "http://localhost:3000",    # Alternative dev port
+            "http://127.0.0.1:3000",    # Alternative dev port
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True     # If you need to handle cookies/auth
+    }
+})
+
+# Rest of your server.py code remains the same...
 
 class ManuscriptServer:
     def __init__(self, raw_dir: str = "data/raw", transcripts_dir: str = "data/transcripts"):
@@ -340,11 +360,32 @@ def transcription_status(title):
     if title not in manuscript_server.transcription_status:
         return jsonify({'status': 'not_started'})
     
-    return jsonify(manuscript_server.transcription_status[title])
+    status = manuscript_server.transcription_status[title].copy()
+    
+    # If transcription is in progress, check the actual progress from the file
+    if status['status'] == 'in_progress':
+        try:
+            # Get manuscript folder name
+            safe_title = "".join(c if c.isalnum() or c in (' ', '.', '_', '-') else '_' 
+                               for c in title)
+            transcript_path = manuscript_server.transcripts_dir / safe_title / 'transcription.json'
+            
+            if transcript_path.exists():
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    transcript_data = json.load(f)
+                    # Update status with actual progress
+                    status['successful_pages'] = len([p for p in transcript_data.get('pages', []) 
+                                                    if not p.get('error')])
+        except Exception as e:
+            logger.error(f"Error reading transcript file for {title}: {e}")
+            # If we can't read the file, just return the status as is
+            pass
+    
+    return jsonify(status)
 
-@app.route('/search', methods=['GET'])
+@app.route('/search/manuscripts', methods=['GET'])
 def search_manuscripts():
-    """Search manuscripts using keyword query."""
+    """Search manuscripts using metadata."""
     query = request.args.get('q', '')
     num_results = int(request.args.get('limit', 10))
     
@@ -352,10 +393,34 @@ def search_manuscripts():
         return jsonify({'error': 'No search query provided'}), 400
         
     search_engine = init_search_engine()
-    results = search_engine.search(query, num_results=num_results)
+    results = search_engine.search_manuscripts(query, num_results=num_results)
     
     return jsonify({
         'query': query,
+        'num_results': len(results),
+        'results': results
+    })
+
+@app.route('/search/pages', methods=['GET'])
+def search_pages():
+    """Search pages across all manuscripts or within a specific manuscript."""
+    query = request.args.get('q', '')
+    num_results = int(request.args.get('limit', 10))
+    manuscript_title = request.args.get('manuscript')  # Optional
+    
+    if not query:
+        return jsonify({'error': 'No search query provided'}), 400
+        
+    search_engine = init_search_engine()
+    results = search_engine.search_pages(
+        query, 
+        num_results=num_results,
+        manuscript_title=manuscript_title
+    )
+    
+    return jsonify({
+        'query': query,
+        'manuscript': manuscript_title,
         'num_results': len(results),
         'results': results
     })
@@ -372,6 +437,21 @@ def similar_manuscripts(title):
         'manuscript': title,
         'num_similar': len(results),
         'similar_manuscripts': results
+    })
+
+@app.route('/manuscripts/<path:title>/pages/<int:page>/similar', methods=['GET'])
+def similar_pages(title, page):
+    """Find pages similar to a given one."""
+    num_results = int(request.args.get('limit', 5))
+    
+    search_engine = init_search_engine()
+    results = search_engine.get_similar_pages(title, page, num_results=num_results)
+    
+    return jsonify({
+        'manuscript': title,
+        'page': page,
+        'num_similar': len(results),
+        'similar_pages': results
     })
 
 @app.route('/search/status', methods=['GET'])
