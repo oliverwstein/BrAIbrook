@@ -225,8 +225,9 @@ class ManuscriptProcessor:
         - Identify distinctive elements of THIS page
         - Support topic analysis and page retrieval
         - Focus on what makes this page unique within the manuscript
+        - Always include language as a keyword, being specific where possible
         Include: specific names, places, events, unique decorative elements, 
-        dates, and concepts central to this page's content
+        dates, and concepts central to this page's content.
         Avoid: features common across the manuscript (script type, material, general topic)
 
         Summary serves to:
