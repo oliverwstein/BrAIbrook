@@ -355,11 +355,33 @@ def process_manuscript(manuscript_path: str, output_dir: str,
             'failed_pages': []
         }
         
+        # Always create a 20-character display title
+        title_length = 20
+        if len(manuscript_title) > title_length:
+            display_title = manuscript_title[:17] + '...'
+        else:
+            display_title = manuscript_title.ljust(title_length)
+
+        # Initialize timing variables
+        start_time = time.time()
+        last_update = start_time
+        
         # Process pages
-        with tqdm(total=len(image_files), desc=f"Processing {manuscript_title}", unit="page") as pbar:
+        with tqdm(total=len(image_files), 
+                 desc=display_title, 
+                 unit='page',
+                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]') as pbar:
+            
             idx = 0
             while idx < len(image_files):
                 try:
+                    # Update progress bar with current page time every second
+                    current_time = time.time()
+                    if current_time - last_update >= 1:  # Update display every second
+                        page_time = int(current_time - start_time)
+                        pbar.set_postfix({'page_time': f'{page_time}s'}, refresh=True)
+                        last_update = current_time
+                    
                     # Check if we have a valid existing transcription for this page
                     existing_page = (results['pages'][idx] 
                                    if idx < len(results['pages']) and 'error' not in results['pages'][idx] 
@@ -390,14 +412,16 @@ def process_manuscript(manuscript_path: str, output_dir: str,
                     if 'error' not in page_result:
                         if not existing_page:  # Only increment if this is a new success
                             results['successful_pages'] += 1
-                        pbar.set_postfix(successful=f"{results['successful_pages']}/{idx+1}")
                         idx += 1
                     else:
                         if idx + 1 not in results['failed_pages']:
                             results['failed_pages'].append(idx + 1)
-                        pbar.set_postfix(failed=f"{len(results['failed_pages'])} pages")
                     
                     pbar.update(1)
+                    
+                    # Reset timer for next page
+                    start_time = time.time()
+                    last_update = start_time
                     
                     # Save progress
                     with open(output_path, 'w', encoding='utf-8') as f:
