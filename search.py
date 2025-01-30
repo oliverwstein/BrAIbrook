@@ -25,7 +25,7 @@ class ManuscriptSearchEngine:
             stop_words='english',
             ngram_range=(1, 2),
             max_df=0.9,    # Ignore terms that appear in more than 90% of docs
-            min_df=2       # Ignore terms that appear in fewer than 2 docs
+            min_df=1       # Ignore terms that appear in fewer than 1 docs
         )
         
         self.page_vectorizer = TfidfVectorizer(
