@@ -34,10 +34,10 @@ def extract_metadata_and_iiif(driver, manuscript_url):
         driver.get(manuscript_url)
 
         # Wait for both the metadata section and the IIIF manifest link to be present
-        WebDriverWait(driver, 30).until(
+        WebDriverWait(driver, 90).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'dl.document-metadata'))
         )
-        WebDriverWait(driver, 30).until(
+        WebDriverWait(driver, 90).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'a.hl__viewer-link'))
         )
 
@@ -134,12 +134,13 @@ def scrape_houghton_manuscripts(base_url, num_pages, output_dir):
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images to speed up
     driver = webdriver.Chrome(options=options)
 
     manuscript_urls = set()
 
     # Scrape list of manuscript URLs
-    for page_num in tqdm(range(1, num_pages + 1), desc="Scraping manuscript list"):
+    for page_num in tqdm(range(4, num_pages + 1), desc="Scraping manuscript list"):
         url = f"{base_url}&page={page_num}&per_page=96"
 
         try:
@@ -183,8 +184,9 @@ def scrape_houghton_manuscripts(base_url, num_pages, output_dir):
         # Skip scraping if images already exist
         if os.path.exists(manuscript_dir):
             if any(f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) for f in os.listdir(manuscript_dir)):
-                print(f"Skipping {title}, images already exist.")
                 continue
+        else:
+            print(f"Create directory for {manuscript_url}")
         create_directory(manuscript_dir)
 
 
