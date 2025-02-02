@@ -2,6 +2,7 @@ import argparse
 import os
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from PIL import Image
 from typing import Dict, List, Optional
 from tqdm import tqdm
 import google.generativeai as genai
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -16,6 +18,33 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_safe_filename(title: str, max_length: int = 200) -> str:
+    """
+    Create a safe filename from a manuscript title, handling length limits.
+    
+    Args:
+        title: Original manuscript title
+        max_length: Maximum length for the filename (default 200 to stay well under filesystem limits)
+    
+    Returns:
+        A safe filename that:
+        - Contains only alphanumeric chars plus space, period, underscore, hyphen
+        - Is under the specified length limit
+        - Maintains uniqueness using a hash suffix for long titles
+    """
+    # First convert to safe characters
+    safe_title = "".join(c if c.isalnum() or c in (' ', '.', '_', '-') else '_' 
+                        for c in title)
+    
+    # If under length limit, return as is
+    if len(safe_title) <= max_length:
+        return safe_title
+        
+    # For long titles, truncate and add hash to ensure uniqueness
+    hash_suffix = hashlib.md5(title.encode()).hexdigest()[:8]
+    truncated = safe_title[:max_length - len(hash_suffix) - 1]
+    return f"{truncated}_{hash_suffix}"
 
 class RateLimiter:
     """Rate limiter for API requests respecting both per-minute and daily limits."""
@@ -69,55 +98,148 @@ class TranscriptionError(Exception):
     pass
 
 def extract_json_from_response(text: str) -> Dict:
-    """Extract and validate JSON from model response, handling nested JSON in code blocks."""
-    try:
-        # First see if we have valid JSON in a code block
-        code_block_pattern = r"```(?:json)?\n(.*?)\n```"
-        import re
-        matches = re.findall(code_block_pattern, text, re.DOTALL)
-        if matches:
-            # Try each code block
-            for block in matches:
-                try:
-                    parsed = json.loads(block)
-                    if all(key in parsed for key in ['transcription', 'revised_transcription', 'summary']):
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
-        
-        # If no valid JSON in code blocks, try parsing the whole text
-        try:
-            parsed = json.loads(text)
-            # If it has our expected structure, return it
-            if all(key in parsed for key in ['transcription', 'revised_transcription', 'summary']):
-                return parsed
-            # If it contains code blocks in transcription/revised_transcription, parse those
-            if isinstance(parsed.get('transcription'), str) and '```json' in parsed['transcription']:
-                inner_matches = re.findall(code_block_pattern, parsed['transcription'], re.DOTALL)
-                if inner_matches:
-                    try:
-                        inner = json.loads(inner_matches[0])
-                        if all(key in inner for key in ['transcription', 'revised_transcription', 'summary']):
-                            return inner
-                    except json.JSONDecodeError:
-                        pass
-        except json.JSONDecodeError:
-            pass
-            
-    except Exception as e:
-        logger.warning(f"Failed to parse JSON response: {str(e)}")
-    
-    # If we get here, create a default response
-    return {
+    """
+    Extracts JSON from a text, using a hybrid approach of standard JSON parsing and regex section-based extraction.
+    It first attempts standard parsing, and then tries targeted extraction with section-specific formatting.
+    """
+    default_response = {
         'transcription': '',
         'revised_transcription': '',
-        'summary': text if len(text) < 1000 else text[:1000] + '...',
+        'summary': text,
         'keywords': [],
         'marginalia': [],
         'confidence': 0,
         'transcription_notes': 'Failed to parse JSON response',
         'content_notes': 'Original response preserved in summary field'
     }
+
+    try:
+        # 1. Standard JSON Parsing Attempt
+        try:
+           parsed = fix_json_and_load(text)
+           if validate_keys(parsed):
+             return parsed
+           else:
+             logger.error(f"Standard JSON parse failed key validation. Full text:\n{text}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Standard JSON decode error: {e}. Full text:\n{text}")
+
+        # 2. Section-Based Extraction Attempt
+        extracted = extract_and_clean_sections(text)
+        if extracted and validate_keys(extracted):
+            return extracted
+        else:
+            logger.error(f"Section-based extraction failed. Full text:\n{text}")
+
+    except Exception as e:
+        logger.error(f"Unexpected error during JSON parsing: {e}. Full text:\n{text}")
+    
+    return default_response
+
+def extract_and_clean_sections(text: str) -> Dict:
+    """Extracts and cleans specific sections from text using robust JSON parsing."""
+    
+    section_patterns = {
+        'transcription': create_robust_pattern('transcription'),
+        'revised_transcription': create_robust_pattern('revised_transcription'),
+        'summary': r'"summary"\s*:\s*"?(.*?)"?(?=\s*,\s*"(?:keywords|marginalia|confidence|transcription_notes|content_notes)"|\s*\})',
+        'keywords': r'"keywords"\s*:\s*\[(.*?)\]',
+        'marginalia': r'"marginalia"\s*:\s*\[(.*?)\]',
+        'confidence': r'"confidence"\s*:\s*(\d+)',
+        'transcription_notes': r'"transcription_notes"\s*:\s*"?(.*?)"?(?=\s*,\s*"content_notes"|\s*\})',
+        'content_notes': r'"content_notes"\s*:\s*"?(.*?)"?(?=\s*\})'
+    }
+    
+    extracted = {}
+    for key, pattern in section_patterns.items():
+        try:
+            match = re.search(pattern, text, re.DOTALL | re.MULTILINE)
+            if match:
+                value = match.group(1).strip()
+                
+                if key in ('transcription', 'revised_transcription'):
+                    # Use string literal parsing for transcription fields
+                    value = parse_json_string(value)
+                elif key in ('keywords', 'marginalia'):
+                    # Split and clean arrays
+                    value = [
+                        item.strip().strip('"').strip("'") 
+                        for item in re.findall(r'"([^"]*)"', value) if item.strip()
+                    ]
+                elif key == 'confidence':
+                    try:
+                        value = float(value)
+                    except:
+                        value = 0
+                else:
+                    # Clean string values
+                    value = re.sub(r'\\(["\\])', r'\1', value)
+                
+                extracted[key] = value
+                
+        except Exception as e:
+            logger.warning(f"Error parsing section {key}: {e}")
+    
+    return extracted
+
+def create_robust_pattern(field_name: str) -> str:
+    """Creates a robust pattern for extracting JSON fields."""
+    return fr'"{field_name}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+
+def parse_json_string(text: str) -> str:
+    """
+    Parses a JSON string value, properly handling escapes and special characters.
+    
+    Args:
+        text: The string to parse, without surrounding quotes
+        
+    Returns:
+        Properly decoded string with preserved line breaks and special characters
+    """
+    try:
+        # Handle escaped characters properly
+        decoded = text.encode('utf-8').decode('unicode-escape')
+        
+        # Preserve intentional line breaks and structural marks
+        decoded = decoded.replace('\\n', '\n')
+        decoded = decoded.replace('\\|', '|')
+        
+        return decoded
+    except Exception as e:
+        logger.warning(f"Error parsing JSON string: {e}")
+        return text
+    
+def fix_json_and_load(json_string: str) -> Dict:
+    """Attempts to fix common JSON formatting errors before loading."""
+    
+    # Remove trailing commas in objects
+    json_string = re.sub(r',\s*([}\]])', r'\1', json_string)
+    
+    # Unescapes escaped forward slashes
+    json_string = json_string.replace('\\/', '/')
+    
+    # Handle single quotes by replacing them with double quotes (if that's not in the string already)
+    if "'" in json_string and '"' not in json_string:
+        json_string = json_string.replace("'", '"')
+    
+    # Remove leading '```json\n{'
+    json_string = re.sub(r'^```(?:json)?\s*\n\s*{', '{', json_string, flags=re.DOTALL)
+    
+    try:
+        return json.loads(json_string)
+    except json.JSONDecodeError:
+        # Try a more aggressive fix and then load
+        json_string = re.sub(r'([{\[,])\s*([}\]\,])', r'\1\2', json_string)
+        json_string = re.sub(r'([{\[,])\s*([}\]\,])', r'\1\2', json_string)
+        try:
+           return json.loads(json_string)
+        except:
+            raise
+
+def validate_keys(data: Dict) -> bool:
+    """Validates that the extracted JSON contains the necessary keys."""
+    required_keys = ['transcription', 'revised_transcription', 'summary']
+    return all(key in data for key in required_keys)
 
 def format_malformed_response(text: str, model: genai.GenerativeModel) -> Dict:
     """Attempt to format malformed response using Gemini Pro."""
@@ -189,61 +311,116 @@ class ManuscriptProcessor:
         genai.configure(api_key=api_key)
         return genai.GenerativeModel("gemini-1.5-pro")
     
+    def _initialize_model(self) -> genai.GenerativeModel:
+        """Initialize and configure the Gemini model."""
+        api_key = os.environ.get('GEMINI_API_KEY')
+        if not api_key:
+            raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
+        
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel("gemini-1.5-pro")
+    
     def _construct_prompt(self, metadata: Dict, page_number: int,
-                         previous_page: Optional[Dict], next_page: Optional[Dict]) -> str:
+                         previous_page: Optional[Dict], next_page: Optional[Dict], notes: str) -> str:
         """Create the analysis prompt for a manuscript page."""
         return f"""As an expert paleographer examining this manuscript page, provide a detailed analysis 
         following these guidelines:
 
-        MANUSCRIPT CONTEXT:
+        ANALYSIS GUIDELINES:
+
+        CONTEXT:
         Metadata: {json.dumps(metadata, indent=2)}
-        Page Number: {page_number}
+        Page: {page_number}
         Previous Content: {previous_page['revised_transcription'] if previous_page else 'Not available'}
         Following Content: {next_page['transcription'] if next_page else 'Not available'}
+        Notes: {notes if notes else 'Not given'}
 
-        PAGE ANALYSIS GUIDELINES:
-        1. For Non-Text Pages:
-        - Bindings, covers, blank pages: Provide descriptive summary only
-        - Modern additions (bookplates, labels): Note presence and content
-        - Decorative elements: Describe without transcription
-        - Leave transcription and revised_transcription fields empty for these cases
+        Begin by examining the metadata to understand:
+        - The manuscript's purpose and historical context
+        - Expected content type and organization
+        - Known authors, sources, or attributions
+        This context should inform your entire analysis, especially name identification and terminology.
 
-        2. For Pages with Text:
-        Main Text Transcription:
-        - Preserve original line breaks with |
-        - Mark paragraph breaks with ||
+        ANALYSIS GUIDELINES:
+
+        1. Page Layout and Type:
+        First determine the page's basic arrangement:
+        - Text layout (single column, double column, etc.)
+        - Number of lines per column
+        - Text blocks and their relationships
+        - Presence of ruling or frames
+        - Headers, footers, or running text
+
+        Then classify the page type:
+        - Primary text page (describe arrangement)
+        - Special element (binding, flyleaf, illustration)
+        - Mixed content (note how text and decoration interact)
+        This organization determines your transcription approach.
+
+        2. Transcription Approach:
+        Initial transcription:
+        For each text block in order:
+        - Start new blocks with ||
+        - Record each line, marking breaks with |
+        - Follow the text's visual arrangement
         - Use [brackets] for uncertain readings
         - Use <angle brackets> for editorial additions
         - Mark illegible text with {{...}}
-        - The initial transcript should focus on faithfully recording the letters as best as possible in their immediate context
-        - Changes made based on meaning and context should go in the revised transcript
-        - e.x.: ſ in the initial transcript, but 's' in the revised one.
+        - Maintain original letter forms and spelling
+        Note column changes and uncertain readings in transcription_notes
 
-        3. Keywords and Summary Purpose:
-        Keywords are used to:
-        - Enable search across the manuscript collection
-        - Identify distinctive elements of THIS page
-        - Support topic analysis and page retrieval
-        - Focus on what makes this page unique within the manuscript
-        - Always include language as a keyword, being specific where possible
-        Include: specific names, places, events, unique decorative elements, 
-        dates, and concepts central to this page's content.
-        Avoid: features common across the manuscript (script type, material, general topic)
+        Revised transcription:
+        Working with the text's structure:
+        - Use context to correct likely misreadings
+        - Apply historical and language knowledge
+        - Standardize letter forms (e.g., 's' for 'ſ')
+        - Resolve abbreviations using context
+        - Choose readings that align with:
+        * Document's language and period
+        * Names from metadata
+        * Surrounding context
+        - Preserve text block organization
+        Document significant revisions in transcription_notes
 
-        Summary serves to:
-        - Guide future translation efforts
-        - Explain page-specific context and references
-        - Track narrative or argumentative development
-        - Connect to surrounding pages
-        Keep summaries clear, specific, and focused on content unique to this page.
+        3. Summary Writing:
+        Create a clear narrative of the page's content that could be read in sequence with other page summaries to understand the manuscript. Focus on:
+        - What actually happens or is discussed
+        - How ideas or narratives progress
+        - Who speaks or is discussed
+        - What sources are quoted or referenced
+        - Which topics begin or conclude
+        The summary should help readers follow the text's development while supporting search and navigation, 
+        so note headers and marks for possible beginning and ends of sections. 
+        Note significant interpretive decisions in content_notes.
+        Avoid:
+        - "This page contains..." or "This page shows..."
+        - Generic content descriptions or information that applies to the whole manuscript
 
-        4. Analysis Process:
-        - First determine if page requires transcription
-        - For text pages: perform careful reading, document uncertainties
-        - For non-text pages: focus on description and context
-        - Compare with surrounding context when relevant
-        - Note any special features or conditions
-        - Transcript revisions should be more conservative when the text is clearer
+        4. Keyword Selection:
+        Choose terms researchers would use to find this content across manuscripts:
+        - Historical figures (standard English forms)
+        - Key concepts and themes
+        - Places and events
+        - Text genres or types
+        Base keywords on:
+        - The specific content of this page
+        - Standard terminology of the period
+        - Likely research interests
+        Document any uncertainty about name identification in content_notes
+
+        5. Marginalia Documentation:
+        Record both text and visual elements in margins:
+        "[location]: [content] ([function/type])"
+        - Note location (top, bottom, left, right, interlinear)
+        - Describe content (text or visual elements)
+        - Indicate function (correction, commentary, decoration)
+        Include significant margin features in content_notes
+
+        Confidence Score:
+        - Higher (80-100): Clear text, standard content
+        - Medium (60-80): Some uncertainty in readings
+        - Lower (below 60): Significant interpretation required
+        Base this on the certainty of your readings and interpretations
 
         Return ONLY a JSON object with this structure:
         {{
@@ -253,25 +430,38 @@ class ManuscriptProcessor:
             "keywords": ["terms following the purpose guidelines above"],
             "marginalia": ["location: content"],
             "confidence": number (0-100),
-            "transcription_notes": "challenges and resolutions, or description of non-text elements",
-            "content_notes": "scholarly observations and contextual information"
+            "transcription_notes": "challenges and resolutions",
+            "content_notes": "scholarly observations and contextual information, as well as descriptions of illustrations and artistic elements."
         }}"""
     
     def process_page(self, image_path: str, metadata: Dict, page_number: int,
                     previous_page: Optional[Dict] = None,
-                    next_page: Optional[Dict] = None) -> Dict:
+                    next_page: Optional[Dict] = None, notes: str = None) -> Dict:
+        """Processes a single page, optionally replacing an existing transcription.
+
+        Args:
+            image_path: Path to the image of the page.
+            metadata: Manuscript metadata.
+            page_number: The page number.
+            previous_page: Transcription data for the previous page (optional).
+            next_page: Transcription data for the next page (optional).
+            notes: Data for improving the transcription (optional)
+        
+        Returns:
+            A dictionary containing the transcription results for the page.
+        """
+
         max_retries = 3
         retry_count = 0
-        
+
         while retry_count < max_retries:
             try:
                 self.rate_limiter.wait_if_needed()
                 image = Image.open(image_path)
-                prompt = self._construct_prompt(metadata, page_number, previous_page, next_page)
-                
+                prompt = self._construct_prompt(metadata, page_number, previous_page, next_page, notes)
+
                 response = self.model.generate_content(
                     [prompt, image],
-                    # generation_config={"temperature": 0.2},
                     safety_settings={
                         genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
                         genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
@@ -279,23 +469,17 @@ class ManuscriptProcessor:
                         genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
                     }
                 )
-                
+
                 result = extract_json_from_response(response.text)
-                
-                # # If JSON parsing failed, try to format with text model
-                # if not result.get('transcription'):
-                #     self.rate_limiter.wait_if_needed()
-                #     result = format_malformed_response(response.text, self.model)
-                
                 result['page_number'] = page_number
                 return result
-                
+
             except Exception as e:
                 retry_count += 1
                 if retry_count < max_retries:
-                    wait_time = 2 ** retry_count * 30
+                    wait_time = 2**retry_count * 30
                     logger.warning(f"Error processing page {page_number}, attempt {retry_count}. "
-                                 f"Waiting {wait_time} seconds before retry. Error: {str(e)}")
+                                   f"Waiting {wait_time} seconds before retry. Error: {str(e)}")
                     time.sleep(wait_time)
                 else:
                     logger.error(f"Failed to process page {page_number} after {max_retries} attempts: {str(e)}")
@@ -313,189 +497,109 @@ class ManuscriptProcessor:
                     }
 
 def process_manuscript(manuscript_path: str, output_dir: str,
-                      processor: ManuscriptProcessor) -> Optional[Dict]:
-    """Process all pages in a manuscript directory, reusing existing successful transcriptions."""
+                      processor: ManuscriptProcessor, replace_existing: bool = False) -> Optional[Dict]:
+    """Process all pages in a manuscript directory.  Replaces existing pages if replace_existing is True."""
+
     try:
         # Load metadata
         metadata_path = os.path.join(manuscript_path, 'metadata.json')
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
-        
+
+    except FileNotFoundError:
+        logger.error(f"Metadata file not found: {metadata_path}")  # More specific error message
+        return None
+
+    try:
         # Setup paths and files
         manuscript_title = metadata.get('Title', os.path.basename(manuscript_path))
-        safe_title = "".join(c if c.isalnum() or c in (' ', '.', '_', '-') else '_' 
-                            for c in manuscript_title)
-        
-        image_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+        safe_title = create_safe_filename(manuscript_title)
+
+        image_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', 'webp'}
         image_files = sorted(
             f for f in os.listdir(manuscript_path)
             if Path(f).suffix.lower() in image_extensions
         )
-        
+
         manuscript_output_dir = os.path.join(output_dir, safe_title)
         os.makedirs(manuscript_output_dir, exist_ok=True)
-        
+
         # Check for existing transcription
         output_path = os.path.join(manuscript_output_dir, 'transcription.json')
         existing_results = None
-        if os.path.exists(output_path):
-            try:
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    existing_results = json.load(f)
-                logger.info(f"Found existing transcription with {len(existing_results.get('pages', []))} pages")
-            except Exception as e:
-                logger.error(f"Error loading existing transcription: {e}")
-        
-        # Initialize results, using existing data if available
-        results = existing_results if existing_results else {
+        try:
+            with open(output_path, 'r', encoding='utf-8') as f:
+                existing_results = json.load(f)
+            logger.info(f"Found existing transcription with {len(existing_results.get('pages', {}))} pages")
+
+            if not replace_existing:  # Log what is being skipped
+                num_skipped = len([page for page in existing_results.get('pages', {}).values() if 'error' not in page])
+                if num_skipped:
+                    logger.info(f"Skipping {num_skipped} existing transcribed pages without errors (use --replace to overwrite)")
+
+        except FileNotFoundError:
+            pass  # File does not exist yet. Handle normally.
+
+        except Exception as e:
+            logger.error(f"Error loading existing transcription: {e}")
+
+
+        # Initialize results. If replace_existing is True then discard existing_results
+        results = existing_results if existing_results and not replace_existing else {
             'manuscript_title': manuscript_title,
             'metadata': metadata,
-            'pages': [],
+            'pages': {},
             'total_pages': len(image_files),
-            'successful_pages': 0,
-            'failed_pages': []
+            'successful_pages': 0
         }
-        
+
+
         # Always create a 20-character display title
         title_length = 20
-        if len(manuscript_title) > title_length:
-            display_title = manuscript_title[:17] + '...'
-        else:
-            display_title = manuscript_title.ljust(title_length)
-
-        # Initialize timing variables
-        start_time = time.time()
-        last_update = start_time
+        display_title = manuscript_title[:17] + '...' if len(manuscript_title) > title_length else manuscript_title.ljust(title_length)
         
         # Process pages
-        with tqdm(total=len(image_files), 
-                 desc=display_title, 
-                 unit='page',
-                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]') as pbar:
-            
-            idx = 0
-            while idx < len(image_files):
+        with tqdm(total=len(image_files), desc=display_title, unit='page') as pbar:  # Simplified tqdm
+
+            for page_number in range(1, len(image_files) + 1):
                 try:
-                    # Update progress bar with current page time every second
-                    current_time = time.time()
-                    if current_time - last_update >= 1:  # Update display every second
-                        page_time = int(current_time - start_time)
-                        pbar.set_postfix({'page_time': f'{page_time}s'}, refresh=True)
-                        last_update = current_time
-                    
-                    # Check if we have a valid existing transcription for this page
-                    existing_page = (results['pages'][idx] 
-                                   if idx < len(results['pages']) and 'error' not in results['pages'][idx] 
-                                   else None)
-                    
-                    if existing_page:
-                        page_result = existing_page
-                    else:
-                        # Get context
-                        previous_page = results['pages'][idx-1] if idx > 0 else None
-                        next_page = None
-                        
-                        # Process page
+                    previous_page = results['pages'].get(str(page_number - 1)) if page_number > 1 else None
+                    next_page = results['pages'].get(str(page_number + 1)) if page_number < len(image_files) else None
+                    existing_page = results['pages'].get(str(page_number))
+
+                    if existing_page and not replace_existing and 'error' not in existing_page:
+                        page_result = existing_page  # Skip if not replacing and page is good.
+
+                    else:  # Always transcribe if there is no existing or it should be replaced.
                         page_result = processor.process_page(
-                            os.path.join(manuscript_path, image_files[idx]),
+                            os.path.join(manuscript_path, image_files[page_number - 1]),
                             metadata,
-                            idx + 1,
+                            page_number,
                             previous_page,
-                            next_page
+                            next_page,
+                            notes=""
+
                         )
-                    
-                    # Update results
-                    if len(results['pages']) <= idx:
-                        results['pages'].append(page_result)
-                    else:
-                        results['pages'][idx] = page_result
-                    
+                    results['pages'][str(page_number)] = page_result
+
                     if 'error' not in page_result:
                         if not existing_page:  # Only increment if this is a new success
                             results['successful_pages'] += 1
-                        idx += 1
-                    else:
-                        if idx + 1 not in results['failed_pages']:
-                            results['failed_pages'].append(idx + 1)
-                    
+
                     pbar.update(1)
-                    
-                    # Reset timer for next page
-                    start_time = time.time()
-                    last_update = start_time
-                    
-                    # Save progress
+
+                    # Save progress after each page
                     with open(output_path, 'w', encoding='utf-8') as f:
                         json.dump(results, f, indent=2, ensure_ascii=False)
-                    
+
                 except Exception as e:
-                    logger.error(f"Error processing page {idx + 1}: {e}")
-                    if idx + 1 not in results['failed_pages']:
-                        results['failed_pages'].append(idx + 1)
-                    idx += 1
-        
+                    logger.error(f"Error processing page {page_number}: {e}")
+
         return results
-        
+
     except Exception as e:
         logger.error(f"Failed to process manuscript at {manuscript_path}: {e}")
         return None
-    
-def batch_process_manuscripts(
-    input_dir: str = 'data/raw',
-    output_dir: str = 'data/transcripts',
-    manuscript_limit: Optional[int] = None
-) -> List[Dict]:
-    """
-    Process manuscripts in the input directory.
-    
-    Args:
-        input_dir: Directory containing manuscript folders
-        output_dir: Directory for output files
-        manuscript_limit: Maximum number of manuscripts to process (None for all)
-    
-    Returns:
-        List of processing results for each manuscript
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    try:
-        processor = ManuscriptProcessor()
-        
-        # Get list of valid manuscript directories
-        manuscripts = [item for item in sorted(os.listdir(input_dir))
-                      if os.path.isdir(os.path.join(input_dir, item)) and
-                      os.path.exists(os.path.join(input_dir, item, 'metadata.json'))]
-        
-        # Apply manuscript limit if specified
-        if manuscript_limit is not None:
-            manuscripts = manuscripts[:manuscript_limit]
-            logger.info(f"Processing {manuscript_limit} of {len(manuscripts)} available manuscripts")
-        
-        batch_results = []
-        for item in tqdm(manuscripts, desc="Processing manuscripts", unit="manuscript"):
-            try:
-                result = process_manuscript(
-                    os.path.join(input_dir, item),
-                    output_dir,
-                    processor
-                )
-                
-                if result:
-                    batch_results.append(result)
-                    
-                    # Save batch progress
-                    batch_results_path = os.path.join(output_dir, 'batch_results.json')
-                    with open(batch_results_path, 'w', encoding='utf-8') as f:
-                        json.dump(batch_results, f, indent=2, ensure_ascii=False)
-                
-            except Exception as e:
-                logger.error(f"Failed to process manuscript {item}: {e}")
-        
-        return batch_results
-        
-    except Exception as e:
-        logger.error(f"Batch processing failed: {e}")
-        return []
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -530,45 +634,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main():
-    """Main entry point for manuscript processing."""
-    try:
-        args = parse_args()
-        
-        # Set API key if provided
-        if args.api_key:
-            os.environ['GEMINI_API_KEY'] = args.api_key
-        
-        # Validate inputs
-        if not os.path.isdir(args.input_dir):
-            raise ValueError(f"Input directory does not exist: {args.input_dir}")
-        
-        if args.manuscripts is not None and args.manuscripts <= 0:
-            raise ValueError("Number of manuscripts must be positive")
-        
-        # Process manuscripts
-        results = batch_process_manuscripts(
-            input_dir=args.input_dir,
-            output_dir=args.output_dir,
-            manuscript_limit=args.manuscripts
-        )
-        
-        # Print summary
-        print("\nProcessing Summary:")
-        print(f"Total manuscripts processed: {len(results)}")
-        
-        total_pages = sum(result['total_pages'] for result in results)
-        successful_pages = sum(result['successful_pages'] for result in results)
-        print(f"Total pages processed: {successful_pages}/{total_pages}")
-        
-        for result in results:
-            print(f"\nManuscript: {result['manuscript_title']}")
-            print(f"Pages processed: {result['successful_pages']}/{result['total_pages']}")
-            if result['failed_pages']:
-                print(f"Failed pages: {result['failed_pages']}")
-                
-    except Exception as e:
-        logger.error(f"Error in main execution: {e}")
-        raise
+    pass
 
 if __name__ == "__main__":
     main()
