@@ -1,0 +1,90 @@
+Analyze this section (chunk {chunk_num}) of the manuscript and integrate it with the analysis of the text up to this point.
+If this is the first chunk, create a new analysis.
+
+Previous Analysis:
+{previous_summary}
+
+CRITICAL INSTRUCTIONS:
+1. Page Numbers:
+   - ONLY use page numbers from the 'page_number' field in the transcript
+   - Disregard any page references in text content or marginalia
+   - Verify all section starts align with actual page numbers
+
+2. Iterative Page Analysis:
+   - Examine each page in sequence
+   - For each page, determine if it:
+     * Continues current section
+     * Starts new major section (Level 0)
+     * Starts new subsection (Level 1)
+     * Starts new sub-subsection (Level 2)
+   - Update table of contents accordingly
+
+3. Section Organization Guidelines:
+   - Level 0: Primary Divisions
+     * Major formal divisions (books, parts)
+     * Principal thematic units
+     * Key liturgical divisions (in religious texts)
+     * Main subject transitions
+     Examples by genre:
+     * Books of Hours: Individual offices
+     * Recipe collections: Major category groups
+     * Poetry: Books or major poem groupings
+     * Treatises: Main books/parts
+
+   - Level 1: Secondary Divisions
+     * Formal subdivisions of main parts
+     * Distinct thematic sections
+     * Complete sub-units
+     Examples by genre:
+     * Books of Hours: Components within offices
+     * Recipe collections: Specific types of recipes
+     * Poetry: Individual long poems or related groups
+     * Treatises: Chapters or major arguments
+
+   - Level 2: Detailed Divisions
+     * Notable subsections
+     * Discrete elements
+     * Significant passages
+     Examples by genre:
+     * Books of Hours: Individual psalms/prayers
+     * Recipe collections: Notable individual recipes
+     * Poetry: Short poems or stanza groups
+     * Treatises: Specific discussions or examples
+
+   Important:
+   - Follow the text's natural organization
+   - Section lengths vary by genre and content
+   - Consider both formal and functional divisions
+   - Balance between detail and navigability
+   - Respect original structure while adding clarity
+   - Descriptions should be a brief and clear sentence
+   - Section synopses can be up to a paragraph
+   - Do not put more than one section or subsection per page.
+   - Always make sure you have the correct page number.
+   Each section entry must have a title, page number, level, description, and synopsis.
+   Think about the overall structure when writing synopses. 
+
+4. Documentation Requirements:
+   - Record exact page numbers for all sections
+   - Note language or script changes
+   - Track marginalia and annotations
+   - Document physical or layout changes
+   - Identify cross-references between sections
+
+Return your analysis in markdown format, organized as:
+# Identification
+- Title: [Main title]
+- Alternative Titles: [Other known titles]
+- Shelfmark: [Manuscript identifier]
+- Repository: [Holding institution]
+- Date Range: [Start year - End year]
+- Languages: [Languages present]
+- Scribes: [Known scribes]
+
+# Physical Description
+- Material: [Writing material]
+- Dimensions: [Size]
+- Condition: [State of preservation]
+- Layout: [Page layout]
+- Script Type: [Writing style]
+- Decoration: [Artistic elements]

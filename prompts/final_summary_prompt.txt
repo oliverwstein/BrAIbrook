@@ -1,0 +1,99 @@
+Analyze this complete manuscript and generate a structured summary.
+
+CRITICAL INSTRUCTIONS:
+1. Page Number Accuracy:
+   - ONLY use page numbers from the 'page_number' field
+   - Ignore any page references in content or marginalia
+   - Verify all section starts match transcript page numbers
+
+2. Sequential Analysis Process:
+   - Examine each page in order
+   - Determine structural breaks and transitions
+   - Build table of contents progressively
+   - Verify section lengths and organization
+
+3. Section Organization Guidelines:
+   - Level 0: Primary Divisions
+     * Major formal divisions (books, parts)
+     * Principal thematic units
+     * Key liturgical divisions (in religious texts)
+     * Main subject transitions
+     Examples by genre:
+     * Books of Hours: Individual offices
+     * Recipe collections: Major category groups
+     * Poetry: Books or major poem groupings
+     * Treatises: Main books/parts
+
+   - Level 1: Secondary Divisions
+     * Formal subdivisions of main parts
+     * Distinct thematic sections
+     * Complete sub-units
+     Examples by genre:
+     * Books of Hours: Components within offices
+     * Recipe collections: Specific types of recipes
+     * Poetry: Individual long poems or related groups
+     * Treatises: Chapters or major arguments
+
+   - Level 2: Detailed Divisions
+     * Notable subsections
+     * Discrete elements
+     * Significant passages
+     Examples by genre:
+     * Books of Hours: Individual psalms/prayers
+     * Recipe collections: Notable individual recipes
+     * Poetry: Short poems or stanza groups
+     * Treatises: Specific discussions or examples
+
+   Important:
+   - Follow the text's natural organization
+   - Section lengths vary by genre and content
+   - Consider both formal and functional divisions
+   - Balance between detail and navigability
+   - Respect original structure while adding clarity
+   - Descriptions should be a brief and clear sentence
+   - Section synopses can be up to a paragraph
+   - Do not put more than one section or subsection per page
+   - Always make sure you have the correct page number
+   Each section entry must have a title, page number, level, description, and synopsis.
+   Think about the overall structure when writing synopses. 
+
+Return a JSON object with this exact structure:
+{{
+    "summary": {{
+        "title": "main title",
+        "alternative_titles": ["other titles"],
+        "shelfmark": "manuscript identifier",
+        "repository": "holding institution",
+        "date_range": [start_year, end_year],
+        "languages": ["language1", "language2"],
+        "scribes": ["known scribes"],
+        "physical_description": {{
+            "material": "writing material",
+            "dimensions": "size",
+            "condition": "state of preservation",
+            "layout": "page layout",
+            "script_type": "writing style",
+            "decoration": "artistic elements"
+        }},
+        "contents_summary": "comprehensive overview",
+        "historical_context": "historical background",
+        "significance": "scholarly importance",
+        "themes": ["major themes"],
+        "provenance": ["ownership history"]
+    }},
+    "table_of_contents": [
+        {{
+            "title": "section title",
+            "page_number": 1,
+            "level": 0,
+            "description": "section description",
+            "synopsis": "section synopsis"
+        }}
+    ]
+}}
+
+Context from metadata:
+{metadata}
+
+Manuscript content:
+{manuscript_content}
