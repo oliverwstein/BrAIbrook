@@ -74,10 +74,7 @@ class ManuscriptCatalogue:
                 
                 manuscript_id = manuscript_dir.name
                 image_dir = manuscript_dir / 'images'
-                total_pages = len([
-                    f for f in image_dir.iterdir() 
-                    if f.is_file() and f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
-                ])
+                total_pages = len(list(image_dir.iterdir()))
                 
                 transcription_path = manuscript_dir / 'transcription.json'
                 transcribed_pages = 0
