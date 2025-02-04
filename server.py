@@ -47,7 +47,7 @@ CORS(app, resources={
         "supports_credentials": True     # If you need to handle cookies/auth
     }
 })
-
+app.config['PROPAGATE_EXCEPTIONS'] = True
 class ManuscriptServer:
     def __init__(self, raw_dir: str = "data/raw", transcripts_dir: str = "data/transcripts"):
         logger.info("Starting ManuscriptServer initialization...")
@@ -301,11 +301,10 @@ class ManuscriptServer:
                     'transcribed': True,
                     'transcript_file': transcript_file,
                     'transcription_info': {
-                        'successful_pages': len(transcription_data.get('pages', {})),
+                        'successful_pages': transcription_data.get('successful_pages', 0),
                         'failed_pages': transcription_data.get('failed_pages', []),
                         'last_updated': transcription_data.get('last_updated', None)
                     },
-                    'pages': transcription_data.get('pages', {}),
                     'summary': transcription_data.get('summary', {}),
                     'table_of_contents': transcription_data.get('table_of_contents', [])
                 })
@@ -402,23 +401,24 @@ def manuscript_info(title):
 
 @app.route('/manuscripts/<path:title>/transcription', methods=['GET'])
 def get_manuscript_transcription(title):
-    """Get complete transcription data for a manuscript."""
     info = manuscript_server.get_manuscript_info(title)
     if not info:
         return jsonify({'error': 'Manuscript not found'}), 404
         
     try:
-        # Get transcript file path
-        safe_title = create_safe_filename(title)
-        transcript_path = manuscript_server.transcripts_dir / safe_title / 'transcription.json'
+        # Find the correct transcript path by matching the original title
+        for transcript_folder in manuscript_server.transcripts_dir.iterdir():
+            transcript_file = transcript_folder / 'transcription.json'
+            if transcript_file.exists():
+                try:
+                    with open(transcript_file, 'r', encoding='utf-8') as f:
+                        transcript_data = json.load(f)
+                        if transcript_data.get('manuscript_title') == title:
+                            return jsonify(transcript_data)
+                except Exception as e:
+                    logger.error(f"Error reading {transcript_file}: {e}")
         
-        if not transcript_path.exists():
-            return jsonify({'error': 'No transcription available'}), 404
-            
-        # Load and return the complete transcription data
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            transcription_data = json.load(f)
-            return jsonify(transcription_data)
+        return jsonify({'error': 'No transcription available'}), 404
             
     except Exception as e:
         logger.error(f"Error loading transcription for {title}: {e}")
@@ -551,9 +551,9 @@ def transcribe_page(title, page):
             notes
         )
         
-        # Update the transcription file
-        safe_title = create_safe_filename(title)
-        transcript_path = manuscript_server.transcripts_dir / safe_title / 'transcription.json'
+        # Create a transcript directory using the original manuscript title
+        safe_manuscript_dir = create_safe_filename(title)
+        transcript_path = manuscript_server.transcripts_dir / safe_manuscript_dir / 'transcription.json'
         
         # Load existing transcription data or create new
         if transcript_path.exists():
@@ -561,7 +561,7 @@ def transcribe_page(title, page):
                 transcription_data = json.load(f)
         else:
             transcription_data = {
-                'manuscript_title': title,
+                'manuscript_title': title,  # Preserve original title
                 'metadata': manuscript_info['metadata'],
                 'pages': {},
                 'total_pages': len(image_files),
@@ -693,11 +693,14 @@ def search_pages():
     """Search pages across all manuscripts or within a specific manuscript."""
     query = request.args.get('q', '')
     num_results = int(request.args.get('limit', 10))
-    manuscript_title = request.args.get('manuscript')  # Optional
+    manuscript_title = request.args.get('manuscript')
     
-    if not query:
-        return jsonify({'error': 'No search query provided'}), 400
-        
+    if manuscript_title:
+        # Normalize the manuscript title to match how it was indexed
+        manuscript_title = search_engine._preprocess_text(manuscript_title)
+    logger.info(f"Searching pages for manuscript: {manuscript_title}")
+    logger.info(f"Available manuscripts: {list(search_engine.manuscripts.keys())}")
+
     search_engine = init_search_engine()
     results = search_engine.search_pages(
         query, 
