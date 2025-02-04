@@ -116,11 +116,11 @@ def extract_json_from_response(text: str) -> Dict:
     try:
         # 1. Standard JSON Parsing Attempt
         try:
-           parsed = fix_json_and_load(text)
-           if validate_keys(parsed):
-             return parsed
-           else:
-             logger.error(f"Standard JSON parse failed key validation. Full text:\n{text}")
+            parsed = fix_json_and_load(text)
+            if validate_keys(parsed):
+                return parsed
+            else:
+                logger.error(f"Standard JSON parse failed key validation. Full text:\n{text}")
         except json.JSONDecodeError as e:
             logger.error(f"Standard JSON decode error: {e}. Full text:\n{text}")
 
@@ -135,6 +135,13 @@ def extract_json_from_response(text: str) -> Dict:
         logger.error(f"Unexpected error during JSON parsing: {e}. Full text:\n{text}")
     
     return default_response
+
+def create_robust_pattern(field_name: str) -> str:
+    """
+    Creates a robust pattern for extracting JSON fields with proper Unicode support.
+    Uses non-greedy matching and proper Unicode character classes.
+    """
+    return fr'"{field_name}"\s*:\s*"((?:\\.|[^"\\])*?)"'
 
 def extract_and_clean_sections(text: str) -> Dict:
     """Extracts and cleans specific sections from text using robust JSON parsing."""
@@ -153,15 +160,15 @@ def extract_and_clean_sections(text: str) -> Dict:
     extracted = {}
     for key, pattern in section_patterns.items():
         try:
-            match = re.search(pattern, text, re.DOTALL | re.MULTILINE)
+            match = re.search(pattern, text, re.DOTALL | re.MULTILINE | re.UNICODE)
             if match:
                 value = match.group(1).strip()
                 
                 if key in ('transcription', 'revised_transcription'):
-                    # Use string literal parsing for transcription fields
-                    value = parse_json_string(value)
+                    # Handle transcription text directly, maintaining Unicode
+                    value = value.replace('\\n', '\n')
                 elif key in ('keywords', 'marginalia'):
-                    # Split and clean arrays
+                    # Split and clean arrays with Unicode support
                     value = [
                         item.strip().strip('"').strip("'") 
                         for item in re.findall(r'"([^"]*)"', value) if item.strip()
@@ -172,8 +179,8 @@ def extract_and_clean_sections(text: str) -> Dict:
                     except:
                         value = 0
                 else:
-                    # Clean string values
-                    value = re.sub(r'\\(["\\])', r'\1', value)
+                    # Clean string values while maintaining Unicode
+                    value = value.replace('\\"', '"').replace('\\\\', '\\')
                 
                 extracted[key] = value
                 
@@ -181,10 +188,6 @@ def extract_and_clean_sections(text: str) -> Dict:
             logger.warning(f"Error parsing section {key}: {e}")
     
     return extracted
-
-def create_robust_pattern(field_name: str) -> str:
-    """Creates a robust pattern for extracting JSON fields."""
-    return fr'"{field_name}"\s*:\s*"((?:[^"\\]|\\.)*)"'
 
 def parse_json_string(text: str) -> str:
     """
@@ -326,8 +329,6 @@ class ManuscriptProcessor:
         return f"""As an expert paleographer examining this manuscript page, provide a detailed analysis 
         following these guidelines:
 
-        ANALYSIS GUIDELINES:
-
         CONTEXT:
         Metadata: {json.dumps(metadata, indent=2)}
         Page: {page_number}
@@ -339,7 +340,7 @@ class ManuscriptProcessor:
         - The manuscript's purpose and historical context
         - Expected content type and organization
         - Known authors, sources, or attributions
-        This context should inform your entire analysis, especially name identification and terminology.
+        This context should inform your analysis, especially name identification and terminology.
 
         ANALYSIS GUIDELINES:
 
@@ -381,6 +382,7 @@ class ManuscriptProcessor:
         * Surrounding context
         - Preserve text block organization
         Document significant revisions in transcription_notes
+        Always include a revised transcription when there is something to transcribe.
 
         3. Summary Writing:
         Create a clear narrative of the page's content that could be read in sequence with other page summaries to understand the manuscript. Focus on:
