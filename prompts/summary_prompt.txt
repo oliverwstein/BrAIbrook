@@ -1,0 +1,111 @@
+Analyze the following manuscript and generate a comprehensive summary and a hierarchical table of contents. 
+Your task is to **order the pages of the manuscript into a hierarchy of sections and subsections**, and then create a table of contents that reflects this hierarchy.
+Do this by grouping pages by section, then dividing those groups into subsections in accordance with the rules below.
+Then, once you have the sections and subsections worked out, create titles, descriptions, and synopses.
+Then, once you have done that, the page_number for a section or subsection is the first page in the group.
+INSTRUCTIONS:
+
+1.  **Overall Structure & Hierarchy:** Begin by understanding the ENTIRE manuscript's structure.  
+Identify major divisions, thematic units, and how different pages and their content relate to each other to form a coherent whole.  
+Think of this as creating an outline *before* filling in the details. Mine the metadata for any clues about the manuscript's structure.
+
+2.  **Hierarchical Table of Contents (TOC):** Create a TOC with up to three levels (0, 1, 2).  The TOC should list the *first page number* where each section or subsection begins.  Follow these STRICT guidelines:
+
+    *   **Level 0 (Major Divisions):**
+        *   Major formal divisions (books, parts, canticles).
+        *   Principal thematic units that structure the entire work (e.g., major arguments, shifts in overall topic).  These units should represent *significant* divisions in the content, *not* just minor topic shifts.
+        *   Key liturgical divisions (in religious texts, e.g., different Hours) *if they represent major structural divisions*.
+        *   Clear transitions to entirely new subjects.
+        *   *Examples:* Books within a multi-book work, major sections in a treatise, different offices in a Book of Hours.
+
+    *   **Level 1 (Secondary Divisions):**
+        *   Formal subdivisions of Level 0 sections (e.g., chapters within books).
+        *   Distinct thematic sections *within* a Level 0 division. These should be complete sub-units of the larger Level 0 section.
+        *   *Examples:* Chapters within a book, major arguments within a treatise section, components within a liturgical office.
+
+    *   **Level 2 (Detailed Divisions - Use Sparingly):**
+        *   Notable subsections *within* a Level 1 division.
+        *   Discrete elements within a Level 1 section that warrant direct reference.
+        *   Significant passages that represent a distinct subtopic or argument *within* a Level 1 section.
+        *   *Examples:* Individual psalms or prayers within a larger office *if they are commonly referenced independently*, specific case studies in a legal text, individual poems within a larger collection *if they are well-known*.
+        *   **CRITICAL:** Only use Level 2 if an element is truly distinct, self-contained, and likely to be sought out directly.  Do NOT use it for every paragraph, minor topic shift, or simply because a page break exists.
+
+3.  **Section Identification Criteria:**  A new section (at any level) should represent a *meaningful* unit of content, *not* just a page break or a slight change in wording.
+
+    *   **New Section Indicators (Strong Signals):**
+        *   **Explicit Markers:** Headings, titles, rubrics, chapter numbers.
+        *   **Major Topic Shifts:**  Clear changes in subject matter with *no* connecting phrases, indicating a shift to a new, distinct topic.
+        *   **Text Type Changes:**  A shift from prose to poetry, dialogue to narration, or other significant changes in the *type* of text.
+        *   **Direct Address to New Topic:** Phrases like "Now we will discuss..." or "Turning to the next point...".
+
+    *   **Continuation Indicators (Weak Signals - NOT a new section *unless* accompanied by a strong signal):**
+        *   **Continuing Sentences:** Sentences continuing from the previous page.
+        *   **Referential Language:** Pronouns, conjunctions, or other words referring back to previous content.
+        *   **Continued Lists/Sequences:** Continuation of a list, argument, or story.
+        *   **Page Breaks:**  A page break *alone* is NOT sufficient to indicate a new section.  It must be accompanied by a strong indicator from the list above.
+
+4.  **Page Numbers:**  Use ONLY the `page_number` field. The TOC entry should list the page number where the section *begins*. Ignore any page references within the text or marginalia.
+
+5. **Summary Content:** Provide a concise and informative summary covering these aspects:
+
+    *   **Title:** The main title of the manuscript.
+    *   **Alternative Titles:** Other known titles.
+    *   **Shelfmark:** The manuscript's unique identifier.
+    *   **Repository:** The institution holding the manuscript.
+    *   **Date Range:** The estimated date range (start and end years).
+    *   **Languages:** The languages used in the manuscript.
+    *   **Scribes:** Known scribes (if any).
+    *   **Physical Description:**
+        *   **Material:** Writing material (e.g., parchment, paper).
+        *   **Dimensions:** Size of the manuscript.
+        *   **Condition:** State of preservation.
+        *   **Layout:** Page layout and organization.
+        *   **Script Type:** The style of writing.
+        *   **Decoration:** Artistic elements or illuminations.
+    *   **Contents Summary:**  A comprehensive overview of the manuscript's contents.
+    *   **Historical Context:** The historical background and setting.
+    *   **Significance:**  The manuscript's scholarly importance.
+    *   **Themes:**  Major themes or topics addressed.
+    *   **Provenance:**  The history of ownership (if known).
+
+
+Return a JSON object with this exact structure:
+{{
+    "summary": {{
+        "title": "main title",
+        "alternative_titles": ["other titles"],
+        "shelfmark": "manuscript identifier",
+        "repository": "holding institution",
+        "date_range": [start_year, end_year],
+        "languages": ["language1", "language2"],
+        "scribes": ["known scribes"],
+        "physical_description": {{
+            "material": "writing material",
+            "dimensions": "size",
+            "condition": "state of preservation",
+            "layout": "page layout",
+            "script_type": "writing style",
+            "decoration": "artistic elements"
+        }},
+        "contents_summary": "comprehensive overview",
+        "historical_context": "historical background",
+        "significance": "scholarly importance",
+        "themes": ["major themes"],
+        "provenance": ["ownership history"]
+    }},
+    "table_of_contents": [
+        {{
+            "title": "section title",
+            "page_number": 1,
+            "level": 0,
+            "description": "section description",
+            "synopsis": "section synopsis"
+        }}
+    ]
+}}
+
+Context from metadata:
+{metadata}
+
+Manuscript content:
+{manuscript_content}

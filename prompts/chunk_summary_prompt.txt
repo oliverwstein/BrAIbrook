@@ -1,0 +1,115 @@
+Analyze this section (chunk {chunk_num}) of the manuscript and integrate it with the analysis of the text up to this point.
+If this is the first chunk, create a new analysis.
+
+MANUSCRIPT CONTEXT:
+Metadata: {metadata}
+
+Previous Analysis:
+{previous_summary}
+
+ANALYSIS GUIDELINES:
+1. Consider the manuscript's structural elements from metadata:
+   - Look for documented text divisions
+   - Note any formal organizational patterns
+   - Consider typical structures for this manuscript type
+   - Align section breaks with documented rubrics or divisions
+
+CRITICAL INSTRUCTIONS:
+1. Page Numbers:
+   - ONLY use page numbers from the 'page_number' field in the transcript
+   - Disregard any page references in text content or marginalia
+   - Verify all section starts align with actual page numbers
+
+2. Iterative Page Analysis:
+   - Examine each page in sequence
+   - For each page, determine if it:
+     * Starts new major section (Level 0)
+     * Starts new subsection (Level 1)
+     * Starts new sub-subsection (Level 2)
+     * Does not start a new section
+   - Update table of contents if and only if the page starts a new section or subsection.
+
+3. Section Organization Guidelines:
+
+    CRITICAL RULES FOR ALL SECTIONS:
+    - Never create a section for content that merely continues from a previous page
+    - Each section must represent a meaningful unit of content
+    - Section titles should describe content, not page features
+    - Avoid generic titles like "Continuation" or "Additional text"
+
+    Level Definitions:
+
+    Level 0 (Primary Divisions):
+    - Major formal or structural divisions only
+    - Examples:
+    * Books/Parts in a multi-part work
+    * Major liturgical divisions (e.g., different Hours)
+    * Primary subject transitions in treatises
+    * Main textual units in miscellanies
+    When to use:
+    - Clear break in content or format
+    - New major topic or text begins
+    - Significant shift in subject matter
+    Never use for:
+    - Continuations of existing sections
+    - Minor topic changes
+    - Visual changes without content breaks
+
+    Level 1 (Secondary Divisions):
+    - Formal subdivisions within primary sections
+    - Examples:
+    * Chapters within books
+    * Components within liturgical sections
+    * Major arguments in treatises
+    When to use:
+    - Clear subsection begins
+    - New subtopic within main section
+    - Distinct unit of related content
+    Never use for:
+    - Continuations of previous subsections
+    - Minor paragraph breaks
+    - Layout changes without content significance
+
+    Level 2 (Detail Divisions):
+    - Use sparingly - only for significant discrete elements
+    - Examples:
+    * Individual prayers in liturgical texts
+    * Specific case studies in legal texts
+    * Notable individual poems in collections
+    When to use:
+    - Only for elements that need direct reference
+    - Clear standalone items within subsections
+    Never use for:
+    - Regular paragraph breaks
+    - Continuing discussion
+    - Minor textual divisions
+
+    CRITICAL REMINDERS:
+    - Structural decisions should prioritize reader navigation
+    - Always ask: "Would someone want to navigate directly to this point?"
+    - If in doubt about a section break, do not create one
+
+4. Documentation Requirements:
+   - Record exact page numbers for all sections
+   - Note language or script changes
+   - Track marginalia and annotations
+   - Document physical or layout changes
+   - Identify cross-references between sections
+
+Return your analysis in markdown format, organized as:
+# Identification
+- Title: [Main title]
+- Alternative Titles: [Other known titles]
+- Shelfmark: [Manuscript identifier]
+- Repository: [Holding institution]
+- Date Range: [Start year - End year]
+- Languages: [Languages present]
+- Scribes: [Known scribes]
+
+# Physical Description
+- Material: [Writing material]
+- Dimensions: [Size]
+- Condition: [State of preservation]
+- Layout: [Page layout]
+- Script Type: [Writing style]
+- Decoration: [Artistic elements]
