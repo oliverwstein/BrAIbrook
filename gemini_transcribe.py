@@ -312,7 +312,7 @@ class ManuscriptProcessor:
             raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
         
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel("gemini-1.5-pro")
+        return genai.GenerativeModel("gemini-2.0-pro-exp")
     
     def _initialize_model(self) -> genai.GenerativeModel:
         """Initialize and configure the Gemini model."""
@@ -321,7 +321,7 @@ class ManuscriptProcessor:
             raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
         
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel("gemini-1.5-pro")
+        return genai.GenerativeModel("gemini-2.0-pro-exp")
     
     def _construct_prompt(self, metadata: Dict, page_number: int,
                          previous_page: Optional[Dict], next_page: Optional[Dict], notes: str) -> str:
@@ -332,11 +332,11 @@ class ManuscriptProcessor:
         CONTEXT:
         Metadata: {json.dumps(metadata, indent=2)}
         Page: {page_number}
-        Previous Content: {previous_page['revised_transcription'] if previous_page else 'Not available'}
-        Following Content: {next_page['transcription'] if next_page else 'Not available'}
+        Previous Content: {previous_page if previous_page else 'Not available'}
+        Following Content: {next_page if next_page else 'Not available'}
         Notes: {notes if notes else 'Not given'}
 
-        Begin by examining the metadata to understand:
+        Use the metadata to understand:
         - The manuscript's purpose and historical context
         - Expected content type and organization
         - Known authors, sources, or attributions
@@ -368,6 +368,8 @@ class ManuscriptProcessor:
         - Use <angle brackets> for editorial additions
         - Mark illegible text with {{...}}
         - Maintain original letter forms and spelling
+        - If there are multiple columns of text, add a break to mark where one ends and the other begins, like this:
+        ========================
         Note column changes and uncertain readings in transcription_notes
 
         Revised transcription:
@@ -384,19 +386,83 @@ class ManuscriptProcessor:
         Document significant revisions in transcription_notes
         Always include a revised transcription when there is something to transcribe.
 
-        3. Summary Writing:
-        Create a clear narrative of the page's content that could be read in sequence with other page summaries to understand the manuscript. Focus on:
-        - What actually happens or is discussed
-        - How ideas or narratives progress
-        - Who speaks or is discussed
-        - What sources are quoted or referenced
-        - Which topics begin or conclude
-        The summary should help readers follow the text's development while supporting search and navigation, 
-        so note headers and marks for possible beginning and ends of sections. 
-        Note significant interpretive decisions in content_notes.
-        Avoid:
-        - "This page contains..." or "This page shows..."
-        - Generic content descriptions or information that applies to the whole manuscript
+        3. Summary/Translation:
+        Create a simple, coherent translation that captures the transcript's content.
+        Leave this section blank if there is no transcript or the transcript is metatext like provenance or repository info.
+        This is essentially a concise translation of the transcript, capturing the original content and voice in modern English.
+        Figure out what the transcript says, and capture it well. Place clarity over syntax unless it is poetry or verse.
+        Your general knowledge about the manuscript from metadata and adjacent pages can help.
+        Use `content_notes` for any discussion of interpretations and editorial decisions.
+
+        *   **For prose:** Focus on clarity, meaning, and the flow of the argument. Resolve ambiguities and expand abbreviations, presenting your best understanding of the author's intended meaning.
+        *   **For poetry or verse:** Attempt to capture the *poetic form* (rhyme, meter, imagery) in your translation, *in addition to* conveying the meaning. Aim for a poetic rendition in modern English.
+        *    **For quotations or citations:** Preserve and notate these.
+
+        Include:
+        - The main topic and key ideas.
+        - Key figures, speakers, and sources (with citations, e.g., "John 14:6").
+        Do *NOT* add your *own* commentary or analysis within the summary/translation (use `content_notes` for that).
+        Use `content_notes` for detailed discussion of interpretive choices, alternative readings, or textual problems.
+
+        **Examples:**
+
+        **Example 1 (No Distinct Voice - List/Description):**
+
+        *Original Latin (Hypothetical):*
+        ```
+        "Nomina apostolorum sunt: Petrus, Andreas, Jacobus, Johannes, Philippus, Bartholomaeus, Thomas, Matthaeus, Jacobus Alphaei, Thaddaeus, Simon Chananaeus, et Judas Iscariotes, qui et tradidit eum."
+        ```
+
+        *Good Summary:*
+        ```
+        The names of the apostles are: Peter, Andrew, James, John, Philip, Bartholomew, Thomas, Matthew, James son of Alphaeus, Thaddaeus, Simon the Canaanite, and Judas Iscariot, who also betrayed him.
+        ```
+
+        **Example 2 (Garbled Transcript with Clarification in Summary):**
+
+         *Original Latin (Hypothetical, with ambiguity):*
+        ```
+        "Dicit eni [Dñs] in ps[almo]: 'Dilig[..] me, et eripia[m] eu[m]; p[ro]tegam eu[m], q[uonia]m cognovit nome[n] meu[m].'  H[oc] e[st], q[uia] dil[..]io e[st] f[un]dame[n]t[um] o[mn]is b[o]ni, et p[ro]te[c]tio di[vin]a seq[ui]t[ur] dil[..]ione[m].  S[ed] [q]uis dil[..]it?  [Nisi?] fid[elis]..."
+        ```
+
+        *Good Summary:*
+
+        ```
+        For the Lord says in the Psalm, "Because he has loved me, I will deliver him; I will protect him, because he has known my name" (Psalm 91:14). This means that love is the foundation of all good, and divine protection follows love. But who loves? Only the faithful...
+        ```
+
+        **Example 3 (Illustrating an interpretive choice):**
+
+         *Original Latin (Hypothetical, with ambiguity):*
+        ```
+        "Et dixit angelus: 'Noli timere, Maria.'  Invenisti enim gratiam apud Deum.  Et ecce, concipies in utero, et paries filium, et vocabis nomen eius Jesum."
+        ```
+
+        *Good Summary:*
+
+        ```
+         And the angel said, "Do not be afraid, Mary, for you have found favor with God. And behold, you will conceive in your womb and bear a son, and you shall call his name Jesus" (Luke 1:30-31).  [The angel here is understood to be Gabriel.]
+        ```
+
+        **Example 4 (Poetic Text):**
+
+        *Original Latin (Hypothetical Hymn):*
+        ```
+        "Ave, maris stella,
+        Dei Mater alma,
+        Atque semper Virgo,
+        Felix caeli porta."
+        ```
+
+        *Good Summary:*
+        ```
+        Hail, star of the sea,
+        Loving Mother of God,
+        And ever Virgin,
+        Happy gate of heaven.
+        ```
+        *Why this is now a good example:* This summary attempts to maintain a poetic structure.
+
 
         4. Keyword Selection:
         Choose terms researchers would use to find this content across manuscripts:
@@ -408,7 +474,7 @@ class ManuscriptProcessor:
         - The specific content of this page
         - Standard terminology of the period
         - Likely research interests
-        Document any uncertainty about name identification in content_notes
+        Document any uncertainty about name identification in transcription_notes
 
         5. Marginalia Documentation:
         Record both text and visual elements in margins:
@@ -427,13 +493,13 @@ class ManuscriptProcessor:
         Return ONLY a JSON object with this structure:
         {{
             "transcription": "initial transcription with markup (empty string for non-text pages)",
-            "revised_transcription": "refined version after context review (empty string for non-text pages)",
-            "summary": "brief description following the guidelines above",
+            "revised_transcription": "refined transcription after context review",
+            "summary": "content description following the guidelines above",
             "keywords": ["terms following the purpose guidelines above"],
             "marginalia": ["location: content"],
             "confidence": number (0-100),
             "transcription_notes": "challenges and resolutions",
-            "content_notes": "scholarly observations and contextual information, as well as descriptions of illustrations and artistic elements."
+            "content_notes": "a clear description of the contents of the page, its relation to the rest of the text, and descriptions of illustrations and artistic elements."
         }}"""
     
     def process_page(self, image_path: str, metadata: Dict, page_number: int,
@@ -461,7 +527,7 @@ class ManuscriptProcessor:
                 self.rate_limiter.wait_if_needed()
                 image = Image.open(image_path)
                 prompt = self._construct_prompt(metadata, page_number, previous_page, next_page, notes)
-
+                logger.info(f"Prompt tokens: {self.model.count_tokens(prompt)}")
                 response = self.model.generate_content(
                     [prompt, image],
                     safety_settings={
