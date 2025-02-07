@@ -7,9 +7,7 @@ CRITICAL INSTRUCTIONS:
    - Verify all section starts match transcript page numbers
 
 2. Sequential Analysis Process:
-   - Examine each page in order
-   - Determine structural breaks and transitions
-   - Build table of contents progressively
+   - Revise the table of contents based on guidelines below:
    - Verify section lengths and organization
 
 3. Section Organization Guidelines:
@@ -56,6 +54,16 @@ CRITICAL INSTRUCTIONS:
    - Always make sure you have the correct page number
    Each section entry must have a title, page number, level, description, and synopsis.
    Think about the overall structure when writing synopses. 
+
+
+   VALIDATION REQUIREMENTS:
+    Each section entry MUST:
+    1. Start with new content (not continuations)
+    2. Have a unique, descriptive title
+    3. Represent a navigable point of interest
+    4. Align with document structure
+    5. Be the only section on its page
+    6. Fit clearly into the hierarchical structure
 
 Return a JSON object with this exact structure:
 {{

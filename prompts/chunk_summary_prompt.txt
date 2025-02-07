@@ -1,8 +1,18 @@
 Analyze this section (chunk {chunk_num}) of the manuscript and integrate it with the analysis of the text up to this point.
 If this is the first chunk, create a new analysis.
 
+MANUSCRIPT CONTEXT:
+Metadata: {metadata}
+
 Previous Analysis:
 {previous_summary}
+
+ANALYSIS GUIDELINES:
+1. Consider the manuscript's structural elements from metadata:
+   - Look for documented text divisions
+   - Note any formal organizational patterns
+   - Consider typical structures for this manuscript type
+   - Align section breaks with documented rubrics or divisions
 
 CRITICAL INSTRUCTIONS:
 1. Page Numbers:
@@ -13,56 +23,71 @@ CRITICAL INSTRUCTIONS:
 2. Iterative Page Analysis:
    - Examine each page in sequence
    - For each page, determine if it:
-     * Continues current section
      * Starts new major section (Level 0)
      * Starts new subsection (Level 1)
      * Starts new sub-subsection (Level 2)
-   - Update table of contents accordingly
+     * Does not start a new section
+   - Update table of contents if and only if the page starts a new section or subsection.
 
 3. Section Organization Guidelines:
-   - Level 0: Primary Divisions
-     * Major formal divisions (books, parts)
-     * Principal thematic units
-     * Key liturgical divisions (in religious texts)
-     * Main subject transitions
-     Examples by genre:
-     * Books of Hours: Individual offices
-     * Recipe collections: Major category groups
-     * Poetry: Books or major poem groupings
-     * Treatises: Main books/parts
 
-   - Level 1: Secondary Divisions
-     * Formal subdivisions of main parts
-     * Distinct thematic sections
-     * Complete sub-units
-     Examples by genre:
-     * Books of Hours: Components within offices
-     * Recipe collections: Specific types of recipes
-     * Poetry: Individual long poems or related groups
-     * Treatises: Chapters or major arguments
+    CRITICAL RULES FOR ALL SECTIONS:
+    - Never create a section for content that merely continues from a previous page
+    - Each section must represent a meaningful unit of content
+    - Section titles should describe content, not page features
+    - Avoid generic titles like "Continuation" or "Additional text"
 
-   - Level 2: Detailed Divisions
-     * Notable subsections
-     * Discrete elements
-     * Significant passages
-     Examples by genre:
-     * Books of Hours: Individual psalms/prayers
-     * Recipe collections: Notable individual recipes
-     * Poetry: Short poems or stanza groups
-     * Treatises: Specific discussions or examples
+    Level Definitions:
 
-   Important:
-   - Follow the text's natural organization
-   - Section lengths vary by genre and content
-   - Consider both formal and functional divisions
-   - Balance between detail and navigability
-   - Respect original structure while adding clarity
-   - Descriptions should be a brief and clear sentence
-   - Section synopses can be up to a paragraph
-   - Do not put more than one section or subsection per page.
-   - Always make sure you have the correct page number.
-   Each section entry must have a title, page number, level, description, and synopsis.
-   Think about the overall structure when writing synopses. 
+    Level 0 (Primary Divisions):
+    - Major formal or structural divisions only
+    - Examples:
+    * Books/Parts in a multi-part work
+    * Major liturgical divisions (e.g., different Hours)
+    * Primary subject transitions in treatises
+    * Main textual units in miscellanies
+    When to use:
+    - Clear break in content or format
+    - New major topic or text begins
+    - Significant shift in subject matter
+    Never use for:
+    - Continuations of existing sections
+    - Minor topic changes
+    - Visual changes without content breaks
+
+    Level 1 (Secondary Divisions):
+    - Formal subdivisions within primary sections
+    - Examples:
+    * Chapters within books
+    * Components within liturgical sections
+    * Major arguments in treatises
+    When to use:
+    - Clear subsection begins
+    - New subtopic within main section
+    - Distinct unit of related content
+    Never use for:
+    - Continuations of previous subsections
+    - Minor paragraph breaks
+    - Layout changes without content significance
+
+    Level 2 (Detail Divisions):
+    - Use sparingly - only for significant discrete elements
+    - Examples:
+    * Individual prayers in liturgical texts
+    * Specific case studies in legal texts
+    * Notable individual poems in collections
+    When to use:
+    - Only for elements that need direct reference
+    - Clear standalone items within subsections
+    Never use for:
+    - Regular paragraph breaks
+    - Continuing discussion
+    - Minor textual divisions
+
+    CRITICAL REMINDERS:
+    - Structural decisions should prioritize reader navigation
+    - Always ask: "Would someone want to navigate directly to this point?"
+    - If in doubt about a section break, do not create one
 
 4. Documentation Requirements:
    - Record exact page numbers for all sections
