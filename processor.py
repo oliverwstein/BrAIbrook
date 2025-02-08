@@ -154,8 +154,8 @@ def extract_json_fields(text: str) -> Optional[Dict]:
     
     return result if result else None
 
-class ManuscriptCataloguer:
-    def __init__(self, prompt_path: str = "prompts/metadata_prompt.txt"):
+class ManuscriptProcessor:
+    def __init__(self, prompt_path: str = "prompts/processing_prompt.txt"):
         api_key = os.environ.get('GEMINI_API_KEY')
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable not found")
@@ -235,7 +235,7 @@ class ManuscriptCataloguer:
 def main():
     parser = argparse.ArgumentParser(description='Generate standardized manuscript metadata')
     parser.add_argument('dir', help='Path to directory containing manuscript folders')
-    parser.add_argument('--prompt', default='prompts/catalogue_prompt.txt', 
+    parser.add_argument('--prompt', default='prompts/processing_prompt.txt', 
                        help='Path to prompt template file')
     parser.add_argument('--notes', default='', 
                        help='Additional notes or context for analysis')
@@ -250,7 +250,7 @@ def main():
         if not base_path.is_dir():
             raise ValueError(f"Not a directory: {base_path}")
             
-        cataloguer = ManuscriptCataloguer(args.prompt)
+        cataloguer = ManuscriptProcessor(args.prompt)
         
         # Process single manuscript if specified
         if args.single:

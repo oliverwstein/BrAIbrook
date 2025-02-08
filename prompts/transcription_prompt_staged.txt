@@ -123,27 +123,7 @@ Maintain these scholarly standards:
 Examining the manuscript page systematically, applying your paleographic expertise to create a precise, scholarly transcription.
 Always provide an entry for language and transcription_notes if there is a transcript.
 
-A special page (like a front cover or front plate or illustration) might look like this:
-{
-    "body": [],
-    "illustrations": [
-        {
-            "location": "full_page",
-            "description": "Leather binding with blind-stamped decoration",
-            "dimensions": "290x200mm"
-        }
-    ],
-    "marginalia": [],
-    "notes": [
-        {
-            "type": "library_mark",
-            "text": "MS 123",
-            "location": "upper_right"
-        }
-    ],
-    "language": "",
-    "transcription_notes": "Front cover with typical 15th century blind-stamped decoration"
-}
+A special page (like a front cover or front plate or illustration) will have appropriate empty fields for each section--empty sections must be included as empty.
 
 ## OUTPUT SPECIFICATION
 Provide a JSON response exactly matching this structure:
