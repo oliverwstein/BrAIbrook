@@ -1,262 +1,321 @@
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional
 import json
 import logging
-from pathlib import Path
-from typing import Dict, Optional, AsyncIterator, List
+import queue
+import threading
+import time
 import asyncio
-from gemini_transcribe import ManuscriptProcessor  # Ensure this import is correct
-from summarizer import ManuscriptSummarizer  # Ensure this import is correct
-import os
 
-# Configure logging (consistent with manuscript_server.py)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-)
+from transcriber import PageTranscriber
+
+# Configure logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-class TranscriptionManager:
-    def __init__(self, catalogue_dir: str = "data/catalogue"):
-        """Initialize the transcription manager."""
+# Create console handler with formatter
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+class TranscriptionStatus(Enum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+@dataclass
+class TranscriptionJob:
+    manuscript_id: str
+    priority: int
+    total_pages: int
+    completed_pages: int = 0
+    failed_pages: List[int] = None
+    status: TranscriptionStatus = TranscriptionStatus.QUEUED
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+    def __post_init__(self):
+        if self.failed_pages is None:
+            self.failed_pages = []
+
+    def __lt__(self, other):
+        # For PriorityQueue ordering
+        return self.priority < other.priority
+
+class TranscriptionQueueManager:
+    """Manages manuscript transcription jobs and worker threads."""
+
+    def __init__(self, catalogue_dir: Path, num_workers: int = 2):
+        """Initialize the transcription queue manager.
+        
+        Args:
+            catalogue_dir: Path to the manuscript catalogue directory
+            num_workers: Number of worker threads to create
+        """
+        logger.info(f"Opening the Scriptorium with {num_workers} monks")
         self.catalogue_dir = Path(catalogue_dir)
-        logger.info(f"TranscriptionManager initialized with catalogue_dir: {self.catalogue_dir}")
-
-        # Initialize processors
-        api_key = os.environ.get('GEMINI_API_KEY')
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not found")
-
-        self.manuscript_processor = ManuscriptProcessor()
-        self.summarizer = ManuscriptSummarizer(api_key)
-
-        # Track active transcriptions (this is where the state is stored)
-        self.active_transcriptions: Dict[str, Dict] = {}
-        logger.info("TranscriptionManager initialization complete.")
-
-
-    async def transcribe_page(self, manuscript_id: str, page_number: int, notes: str = None) -> Dict:
-        """Transcribes a single page (no changes needed here)."""
-        try:
-            manuscript_dir = self.catalogue_dir / manuscript_id
-            image_dir = manuscript_dir / 'images'
-
-            # Get all files in the images directory
-            image_files = sorted(f for f in image_dir.iterdir() if f.is_file())
-
-            if not image_files:
-                raise ValueError(f"No image files found in {image_dir}")
-
-            if page_number < 1 or page_number > len(image_files):
-                raise ValueError(f"Invalid page number: {page_number}. Valid range: 1-{len(image_files)}")
-
-            metadata = self._load_metadata(manuscript_id)
-
-            transcription_path = manuscript_dir / 'transcription.json'
-            previous_page = None
-            next_page = None
-
-            if transcription_path.exists():
-                with open(transcription_path, 'r', encoding='utf-8') as f:
-                    trans_data = json.load(f)
-                    pages = trans_data.get('pages', {})
-                    if str(page_number - 1) in pages:
-                        previous_page = pages[str(page_number - 1)]
-                    if str(page_number + 1) in pages:
-                        next_page = pages[str(page_number + 1)]
-
-            result = self.manuscript_processor.process_page(
-                str(image_files[page_number - 1]),
-                metadata,
-                page_number,
-                previous_page,
-                next_page,
-                notes
+        self.monk_names = ["Alcuin", "Bede", "Cassiodorus", "Dunstan", "Eadfrith", "Felix", "Gildas", "Hugh"]
+        if not self.catalogue_dir.exists():
+            raise ValueError(f"Catalogue directory not found: {self.catalogue_dir}")
+            
+        self.num_workers = num_workers
+        self.job_queue = queue.PriorityQueue()
+        self.active_jobs: Dict[str, TranscriptionJob] = {}
+        self.completed_jobs: Dict[str, TranscriptionJob] = {}
+        self.worker_threads: List[threading.Thread] = []
+        self.should_stop = threading.Event()
+        self.jobs_lock = threading.Lock()
+        
+        # Create and start worker threads
+        for i in range(num_workers):
+            worker = threading.Thread(
+                target=self._worker_loop,
+                name=f"Brother {self.monk_names[i]}",
+                daemon=True
             )
+            self.worker_threads.append(worker)
+            worker.start()
 
-            await self._update_transcription_file(manuscript_id, page_number, result)
-            return result
+    def queue_manuscript(self, manuscript_id: str, priority: int = 1) -> bool:
+        """Add a manuscript to the transcription queue.
+        
+        Args:
+            manuscript_id: Unique identifier for the manuscript
+            priority: Priority level (lower numbers = higher priority)
+            
+        Returns:
+            bool: True if manuscript was queued successfully
+        """
+        logger.info(f"Manuscript {manuscript_id} has been sent to the Scriptorium with priority {priority}")
+        
+        with self.jobs_lock:
+            # Check if manuscript is already being processed
+            if manuscript_id in self.active_jobs:
+                logger.warning(f"Manuscript {manuscript_id} is already being transcribed")
+                return False
+                
+            try:
+                # Validate manuscript directory
+                manuscript_dir = self.catalogue_dir / manuscript_id
+                if not manuscript_dir.exists():
+                    raise ValueError(f"Manuscript directory not found: {manuscript_id}")
+                
+                # Count total pages
+                image_dir = manuscript_dir / 'images'
+                if not image_dir.exists():
+                    raise ValueError(f"Images directory not found for manuscript: {manuscript_id}")
+                    
+                image_files = [f for f in image_dir.iterdir() 
+                             if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}]
+                total_pages = len(image_files)
+                
+                if total_pages == 0:
+                    raise ValueError(f"No image files found for manuscript: {manuscript_id}")
+                
+                # Create job and add to queue
+                job = TranscriptionJob(
+                    manuscript_id=manuscript_id,
+                    priority=priority,
+                    total_pages=total_pages
+                )
+                self.active_jobs[manuscript_id] = job
+                self.job_queue.put(job)
+                
+                logger.info(f"Successfully queued manuscript {manuscript_id} with {total_pages} pages")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error queueing manuscript {manuscript_id}: {str(e)}", exc_info=True)
+                return False
 
-        except Exception as e:
-            logger.error(f"Error transcribing page {page_number}: {e}")
-            return {
-                'error': str(e),
-                'page_number': page_number
-            }
-
-    async def transcribe_manuscript(self, manuscript_id: str, notes: str = None) -> AsyncIterator[Dict]:
-        """Manages the transcription of an entire manuscript (with detailed logging)."""
-        logger.info(f"1. transcribe_manuscript called for ID: {manuscript_id}, notes: {notes}")
-
-        if manuscript_id in self.active_transcriptions:
-            logger.info(f"2. Manuscript {manuscript_id} already being transcribed.")
-            yield {'status': 'already_running'}  # Return immediately if already running
-            return
-
-        manuscript_dir = self.catalogue_dir / manuscript_id
-        image_dir = manuscript_dir / 'images'
-        logger.info(f"3. Checking manuscript directory: {manuscript_dir}, image directory: {image_dir}")
-
-        if not manuscript_dir.exists() or not image_dir.exists():
-            logger.error(f"4. Manuscript directory or image directory not found: {manuscript_dir}")
-            yield {'status': 'error', 'error': 'Manuscript not found'}
-            return
-
-        total_pages = len(list(image_dir.iterdir()))
-        status_info = {
-            'total_pages': total_pages,
-            'successful_pages': 0,
-            'failed_pages': []
-        }
-        logger.info(f"5. Initial status info: {status_info}")
-
-        try:
-            # Initialize tracking (store transcription state)
-            self.active_transcriptions[manuscript_id] = {
-                'started_at': datetime.now().isoformat(),
-                'current_page': 0,  # Track the current page being processed
-                'status': 'running'
-            }
-            logger.info(f"6. Transcription started for {manuscript_id}")
-
-            # Load existing transcription data (if any)
-            transcription_path = self.catalogue_dir / manuscript_id / 'transcription.json'
-            processed_pages = set()  # Keep track of already processed pages
-            logger.info(f"7. Checking for existing transcription: {transcription_path}")
-            if transcription_path.exists():
-                logger.info("8. Transcription file exists.")
-                with open(transcription_path, 'r', encoding='utf-8') as f:
-                    trans_data = json.load(f)
-                    # Only add pages that were successfully transcribed
-                    processed_pages = {
-                        int(page) for page, data in trans_data.get('pages', {}).items()
-                        if 'error' not in data  # Check for 'error' key
-                    }
-                    status_info['successful_pages'] = len(processed_pages)
-            else:
-                logger.info("10. Transcription file does not exist.")
-
-            logger.info(f"11. Loaded existing data. Processed pages: {processed_pages}, Total Pages: {total_pages}")
-
-            # Loop through each page and transcribe it
-            for page_number in range(1, total_pages + 1):
-                logger.info(f"12. Starting loop iteration for page: {page_number}")
-                if page_number in processed_pages:
-                    logger.info(f"13. Page {page_number} already processed, skipping.")
-                    continue  # Skip already processed pages
-
-                # Update current page in active_transcriptions
-                self.active_transcriptions[manuscript_id]['current_page'] = page_number
-
-                logger.info(f"14. Starting transcription for page {page_number}")
-                result = await self.transcribe_page(manuscript_id, page_number, notes)  # Await the result
-                # logger.info(f"15. Transcription result for page {page_number}: {result}")
-
-                if 'error' not in result:
-                    logger.info("16. Page transcribed successfully.")
-                    status_info['successful_pages'] += 1
-                else:
-                    logger.info(f"17. Page transcription failed: {result['error']}")
-                    status_info['failed_pages'].append(page_number)
-
-
-                logger.info(f"18. Yielding status update for page {page_number}")
-                yield {  # Yield a status update (for SSE)
-                    'status': 'in_progress',
-                    'page': page_number,  # Current page number
-                    **status_info  # Include total_pages, successful_pages, failed_pages
-                }
-                logger.info(f"19. Yielded status update for page {page_number}")
-
-            # After all pages are processed (or if an error occurs)
-            if status_info['successful_pages'] > 0:
-                logger.info(f"20. Generating summary for {manuscript_id}")
-                await self.generate_summary(manuscript_id) # Await summary
-                logger.info(f"21. Summary generated for {manuscript_id}")
-
-            logger.info(f"22. Transcription complete for {manuscript_id}")
-            yield {  # Yield a final 'completed' status
-                'status': 'complete',
-                **status_info
-            }
-
-        except Exception as e:
-            logger.exception(f"23. Error transcribing manuscript: {e}")  # Use logger.exception
-            yield {
-                'status': 'error',
-                'error': str(e),
-                **status_info
-            }
-        finally:
-            logger.info(f"24. Removing {manuscript_id} from active transcriptions")
-            self.active_transcriptions.pop(manuscript_id, None)  # Remove from active transcriptions
-
-    async def generate_summary(self, manuscript_id: str) -> Dict:
-        """Generates a summary (no changes needed here)."""
-        try:
-            transcription_path = self.catalogue_dir / manuscript_id / 'transcription.json'
-            logger.info(f"transcription path: {transcription_path}")
-            self.summarizer.update_transcription(transcription_path)
-            return {'status': 'success'}
-
-        except Exception as e:
-            logger.error(f"Error generating summary: {e}")
-            return {'error': str(e)}
-
-    def get_transcription_status(self, manuscript_id: str) -> Optional[Dict]:
-        """Gets the current transcription status (no changes needed here)."""
-        logger.info(f"get_transcription_status called for {manuscript_id}")
-        status = self.active_transcriptions.get(manuscript_id)
-        logger.info(f"Returning status: {status}")
+    def get_job_status(self, manuscript_id: str) -> Optional[TranscriptionJob]:
+        """Get current status of a transcription job."""
+        status = (self.active_jobs.get(manuscript_id) or 
+                 self.completed_jobs.get(manuscript_id))
+        if status:
+            if status.status.value != "in_progress":
+                logger.debug(f"Retrieved status for {manuscript_id}: {status.status.value}")
         return status
 
-    def _load_metadata(self, manuscript_id: str) -> Dict:
-        """Loads metadata (no changes needed here)."""
-        metadata_path = self.catalogue_dir / manuscript_id / 'metadata.json'
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-
-    async def _update_transcription_file(self, manuscript_id: str,
-                                       page_number: int, page_data: Dict) -> None:
-        """Updates the transcription file (no changes needed here)."""
-        transcription_path = self.catalogue_dir / manuscript_id / 'transcription.json'
-        transcription_path.parent.mkdir(exist_ok=True)
-
+    def _worker_loop(self):
+        """Main worker thread loop processing transcription jobs."""
+        worker_name = threading.current_thread().name
+        logger.info(f"{worker_name} begins their daily devotions")
+        
+        # Create event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Initialize transcriber
         try:
-            # Load existing data or create new
-            if transcription_path.exists():
-                with open(transcription_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            else:
-                image_dir = self.catalogue_dir / manuscript_id / 'images'
-                data = {
-                    'manuscript_id': manuscript_id,
-                    'metadata': self._load_metadata(manuscript_id),
-                    'pages': {},
-                    'total_pages': len(list(image_dir.iterdir())),
-                    'successful_pages': 0,
-                    'failed_pages': []
-                }
-
-            # Update page data
-            data['pages'][str(page_number)] = page_data
-
-            # Update success/failure counts
-            if 'error' not in page_data:
-                data['successful_pages'] = len(data['pages'].keys())
-                if page_number in data['failed_pages']:
-                    data['failed_pages'].remove(page_number)
-            else:
-                if page_number not in data['failed_pages']:
-                    data['failed_pages'].append(page_number)
-
-            # Update timestamp
-            data['last_updated'] = datetime.now().isoformat()
-
-            # Write updated data
-            with open(transcription_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
+            transcriber = PageTranscriber()
         except Exception as e:
-            logger.error(f"Error updating transcription file: {e}")
-            raise
+            logger.error(f"{worker_name} cannot find his quill: {str(e)}", exc_info=True)
+            return
+        
+        while not self.should_stop.is_set():
+            try:
+                # Get next job from queue with timeout
+                try:
+                    job = self.job_queue.get(timeout=1)
+                    logger.debug(f"{worker_name} has been assigned manuscript {job.manuscript_id}")
+                except queue.Empty:
+                    continue
+                
+                manuscript_id = job.manuscript_id
+                manuscript_dir = self.catalogue_dir / manuscript_id
+                transcript_path = manuscript_dir / 'transcript.json'
+                
+                # Update job status to in progress
+                with self.jobs_lock:
+                    if job.status == TranscriptionStatus.QUEUED:
+                        job.status = TranscriptionStatus.IN_PROGRESS
+                        job.started_at = datetime.now()
+                        logger.info(f"{worker_name} has begun transcribing {manuscript_id}")
+                
+                try:
+                    # Initialize or load transcript file
+                    if transcript_path.exists():
+                        # logger.debug(f"Loading existing transcript for {manuscript_id}")
+                        with open(transcript_path, 'r', encoding='utf-8') as f:
+                            transcript = json.load(f)
+                    else:
+                        # logger.debug(f"Creating new transcript for {manuscript_id}")
+                        with open(manuscript_dir / 'standard_metadata.json', 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                        
+                        transcript = {
+                            'manuscript_id': manuscript_id,
+                            'title': metadata.get('title', 'Untitled'),
+                            'pages': {},
+                            'successful_pages': 0,
+                            'failed_pages': [],
+                            'total_pages': job.total_pages,
+                            'last_updated': datetime.now().isoformat()
+                        }
+                    
+                    # Process each page
+                    for page_num in range(1, job.total_pages + 1):
+                        if self.should_stop.is_set():
+                            logger.info(f"{worker_name} has been called to prayer and stopped transcribing {manuscript_id}")
+                            break
+                            
+                        # Skip already transcribed pages
+                        if str(page_num) in transcript['pages']:
+                            # logger.debug(f"Skipping already transcribed page {page_num} of {manuscript_id}")
+                            job.completed_pages += 1
+                            continue
+                        
+                        try:
+                            logger.info(f"{worker_name} is transcribing page {page_num} of {manuscript_id}")
+                            result = loop.run_until_complete(
+                                transcriber.transcribe_page(
+                                    str(manuscript_dir),
+                                    page_num
+                                )
+                            )
+                            
+                            # Handle failed transcription
+                            if result.transcription_notes == "Failed to parse structured response":
+                                logger.warning(f"{worker_name} has spoiled his scribing of {page_num} of {manuscript_id} and shall try again.")
+                                if page_num not in transcript['failed_pages']:
+                                    transcript['failed_pages'].append(page_num)
+                                if page_num not in job.failed_pages:
+                                    job.failed_pages.append(page_num)
+                            else:
+                                logger.debug(f"{worker_name} has transcribed page {page_num} of {manuscript_id}")
+                                if page_num in transcript['failed_pages']:
+                                    transcript['failed_pages'].remove(page_num)
+                                transcript['successful_pages'] += 1
+                                job.completed_pages += 1
+                                
+                                # Add to transcript
+                                transcript['pages'][str(page_num)] = {
+                                    'body': [{'name': s.name, 'text': s.text} for s in result.body],
+                                    'illustrations': [dict(i._asdict()) for i in (result.illustrations or [])],
+                                    'marginalia': [dict(m._asdict()) for m in (result.marginalia or [])],
+                                    'notes': [dict(n._asdict()) for n in (result.notes or [])],
+                                    'language': result.language,
+                                    'transcription_notes': result.transcription_notes
+                                }
+                            
+                            # Save progress
+                            transcript['last_updated'] = datetime.now().isoformat()
+                            with open(transcript_path, 'w', encoding='utf-8') as f:
+                                json.dump(transcript, f, indent=2, ensure_ascii=False)
+                            
+                        except Exception as e:
+                            logger.error(f"{worker_name} cannot decipher page {page_num} of {manuscript_id} and will move on: {str(e)}", 
+                                       exc_info=True)
+                            if page_num not in transcript['failed_pages']:
+                                transcript['failed_pages'].append(page_num)
+                            if page_num not in job.failed_pages:
+                                job.failed_pages.append(page_num)
+                            
+                            # Save after failures too
+                            transcript['last_updated'] = datetime.now().isoformat()
+                            with open(transcript_path, 'w', encoding='utf-8') as f:
+                                json.dump(transcript, f, indent=2, ensure_ascii=False)
+                    
+                    # Update job status to completed
+                    with self.jobs_lock:
+                        job.completed_at = datetime.now()
+                        job.status = TranscriptionStatus.COMPLETED
+                        self.completed_jobs[manuscript_id] = job
+                        self.active_jobs.pop(manuscript_id, None)
+                        logger.info(f"{worker_name} completed manuscript {manuscript_id}")
+                    
+                except Exception as e:
+                    logger.error(f"{worker_name} has made a grave error with {manuscript_id}: {str(e)}", exc_info=True)
+                    with self.jobs_lock:
+                        job.error = str(e)
+                        job.status = TranscriptionStatus.FAILED
+                        job.completed_at = datetime.now()
+                        self.completed_jobs[manuscript_id] = job
+                        self.active_jobs.pop(manuscript_id, None)
+                
+            except Exception as e:
+                logger.error(f"{worker_name} is at a loss: {str(e)}", exc_info=True)
+                continue
+        
+        # Clean up event loop
+        try:
+            loop.stop()
+            loop.close()
+        except Exception as e:
+            logger.error(f"{worker_name} has gone mad and refuses to stop: {str(e)}", exc_info=True)
+    
+    def _get_canonical_hour(self) -> str:
+        """Get the appropriate canonical hour based on current time."""
+        hour = datetime.now().hour
+        if hour < 3: return "Matins"
+        if hour < 6: return "Lauds"
+        if hour < 9: return "Prime"
+        if hour < 12: return "Terce"
+        if hour < 15: return "Sext"
+        if hour < 18: return "None"
+        if hour < 21: return "Vespers"
+        return "Compline"
+    
+    def shutdown(self):
+        """Gracefully shut down the queue manager."""
+        logger.info(f"The scriptorium bell rings for {self._get_canonical_hour()}...")
+        self.should_stop.set()
+        
+        for worker in self.worker_threads:
+            logger.debug(f"Waiting for {worker.name} to finish")
+            worker.join(timeout=5)
+            if worker.is_alive():
+                logger.warning(f"{worker.name} seems to have dozed off at their desk.")
+            else:
+                logger.debug(f"{worker.name} has carefully stored their manuscripts and retired.")
+        
+        logger.info("The Scriptorium sits silent.")

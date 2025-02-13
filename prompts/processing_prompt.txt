@@ -16,6 +16,9 @@ Study the provided pages carefully. Pay attention to:
 - Decorative elements and illustrations
 - Physical characteristics visible in the images
 - Any signs of damage or restoration
+- Layout. The format of the page--columns, lines per page, sections--is very important. 
+    Clarify layout details such as "the right column is text and the left column is commentary" or "the lines are numbered" or "sections start with illuminated initials" in ruling_pattern.
+    Structured commentary, such as would be in the Talmud or any manuscript with regular commentary on most pages, should be noted carefully and counted as a column in columns_per_page.
 
 Use this direct observation along with the provided metadata to create precise, consistent metadata for the whole manuscript to capture both physical characteristics and intellectual content.
 Once you have a sense for the manuscript, review each page provided carefully, deciphering the text and incorporating insights. 
