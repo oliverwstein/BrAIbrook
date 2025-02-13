@@ -125,7 +125,8 @@ Always provide an entry for language and transcription_notes if there is a trans
 
 A special page (like a front cover or front plate or illustration) will have appropriate empty fields for each section.
 Body, illustrations, marginalia, and notes may be empty, but should then be recorded as empty lists: []. 
-Language can be "".
+Language can be "". 
+transcription_notes must never be empty, because if nothing else it will say the page is blank and describe the material.
 
 ## OUTPUT SPECIFICATION
 Provide a JSON response exactly matching this structure:
