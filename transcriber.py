@@ -47,28 +47,6 @@ class TranscriptionResult:
     language: str = ""
     transcription_notes: str = ""
 
-class TranscriberErrorHandler:
-    @staticmethod
-    def is_copyright_error(error_msg: str) -> bool:
-        return "copyrighted material" in error_msg.lower()
-    
-    @staticmethod 
-    def modify_prompt_for_retry(original_prompt: str) -> str:
-        """Modify prompt to emphasize public domain nature."""
-        historical_context = """
-        Context: This is an analysis request for a historical manuscript that is 
-        hundreds of years old and firmly in the public domain. The manuscript 
-        is being analyzed for academic research purposes under fair use principles.
-        """
-        # Insert our context after any existing metadata but before instructions
-        modified = re.sub(
-            r'(CONTEXT:.*?)(ANALYSIS GUIDELINES:)', 
-            f'\\1{historical_context}\n\\2',
-            original_prompt,
-            flags=re.DOTALL
-        )
-        return modified
-    
 def create_robust_pattern(field_name: str) -> str:
     """Creates a robust pattern for extracting JSON fields with proper Unicode support."""
     return fr'"{field_name}"\s*:\s*"((?:\\.|[^"\\])*?)"'
@@ -122,73 +100,106 @@ def extract_json_from_response(text: str) -> Dict:
     except json.JSONDecodeError:
         logger.info("Direct JSON parsing failed, attempting field extraction")
     
-    result = {
-        'body': [],
-        'illustrations': [],
-        'marginalia': [],
-        'notes': [],
-        'language': '',
-        'transcription_notes': ''
-    }
+    # Initialize empty result
+    result = {}
+    extraction_success = False
     
     try:
-        # Extract body sections
-        body_sections = extract_object_array(text, 'body', ['name', 'text'])
-        if body_sections:
-            result['body'] = body_sections
+        # Extract all possible content arrays
+        content_arrays = {
+            'body': ['name', 'text'],
+            'illustrations': ['location', 'description'],
+            'marginalia': ['location', 'text'],
+            'notes': ['type', 'text']
+        }
         
-        # Extract illustrations
-        illustrations = extract_object_array(text, 'illustrations', 
-                                          ['location', 'description'])
-        if illustrations:
-            result['illustrations'] = illustrations
+        for array_name, required_fields in content_arrays.items():
+            extracted = extract_object_array(text, array_name, required_fields)
+            if extracted:
+                result[array_name] = extracted
+                extraction_success = True
         
-        # Extract marginalia
-        marginalia = extract_object_array(text, 'marginalia', 
-                                        ['location', 'text'])
-        if marginalia:
-            result['marginalia'] = marginalia
-        
-        # Extract notes
-        notes = extract_object_array(text, 'notes', ['type', 'text'])
-        if notes:
-            result['notes'] = notes
-        
-        # Extract simple string fields
-        language_match = re.search(create_robust_pattern('language'), text)
-        if language_match:
-            result['language'] = language_match.group(1)
-        
+        # Extract required string fields
         notes_match = re.search(create_robust_pattern('transcription_notes'), text)
         if notes_match:
             result['transcription_notes'] = notes_match.group(1)
+            extraction_success = True
+        else:
+            # transcription_notes is required - if missing, use fallback
+            logger.error("Failed to extract required transcription_notes")
+            return create_fallback_response(text)
         
-        if validate_transcription_data(result):
+        # Extract optional language field
+        language_match = re.search(create_robust_pattern('language'), text)
+        if language_match:
+            result['language'] = language_match.group(1)
+        else:
+            result['language'] = ""  # Empty string is valid for language
+        
+        # Ensure we have minimal valid content
+        if extraction_success and validate_transcription_data(result):
+            # Add empty lists for any missing content arrays
+            for array_name in content_arrays.keys():
+                if array_name not in result:
+                    result[array_name] = []
             return result
         
-        logger.error("Failed to extract valid transcription data")
+        logger.error("Failed to extract sufficient transcription data")
         return create_fallback_response(text)
         
     except Exception as e:
         logger.error(f"Error during JSON extraction: {e}")
         return create_fallback_response(text)
-
+    
 def validate_transcription_data(data: Dict) -> bool:
-    """Validates that the extracted data contains the minimum required structure."""
-    required_fields = ['body', 'language', 'transcription_notes']
-    if not all(field in data for field in required_fields):
+    """
+    Validates only that the types are correct for any fields that exist.
+    Does not require any fields to be present or have specific subfields.
+    """
+    # Must be a dictionary
+    if not isinstance(data, dict):
         return False
     
-    if not isinstance(data['body'], list):
-        return False
-    
-    if not data['body']:
-        return False
-    
-    for section in data['body']:
-        if not isinstance(section, dict):
+    # Validate body is a list of dictionaries if present
+    if 'body' in data:
+        if not isinstance(data['body'], list):
             return False
-        if not all(field in section for field in ['name', 'text']):
+        for section in data['body']:
+            if not isinstance(section, dict):
+                return False
+    
+    # Validate illustrations is a list of dictionaries if present
+    if 'illustrations' in data:
+        if not isinstance(data['illustrations'], list):
+            return False
+        for item in data['illustrations']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate marginalia is a list of dictionaries if present
+    if 'marginalia' in data:
+        if not isinstance(data['marginalia'], list):
+            return False
+        for item in data['marginalia']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate notes is a list of dictionaries if present
+    if 'notes' in data:
+        if not isinstance(data['notes'], list):
+            return False
+        for item in data['notes']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate language is a string if present
+    if 'language' in data:
+        if not isinstance(data['language'], str):
+            return False
+    
+    # Validate transcription_notes is a string if present
+    if 'transcription_notes' in data:
+        if not isinstance(data['transcription_notes'], str):
             return False
     
     return True
@@ -333,7 +344,7 @@ class PageTranscriber:
                 else:
                     response = self.model.generate_content(
                         [prompt, image],
-                        generation_config={"temperature": 0.5},
+                        generation_config={"temperature": 0.3},
                         safety_settings={
                             genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
                             genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
@@ -460,10 +471,14 @@ async def main():
             transcript['pages'][str(args.page)] = transcriber._serialize_result(result)
             
             # Update metadata
-            successful_pages = sum(1 for page in transcript['pages'].values() 
-                                if not any(section.get('name') == 'transcription_error' 
-                                         for section in page.get('body', [])))
-            transcript['successful_pages'] = successful_pages
+            if result.transcription_notes == "Failed to parse structured response":
+                if args.page not in transcript['failed_pages']:
+                    transcript['failed_pages'].append(args.page)
+            else:
+                if args.page in transcript['failed_pages']:
+                    transcript['failed_pages'].remove(args.page)
+                transcript['successful_pages'] += 1
+
             transcript['last_updated'] = datetime.now().isoformat()
             
             # Save the updated transcript
@@ -492,11 +507,13 @@ async def main():
                     transcript['pages'][str(page_num)] = transcriber._serialize_result(result)
                     
                     # Update metadata and save after each page
-                    successful_pages = sum(1 for page in transcript['pages'].values() 
-                                        if not any(section.get('name') == 'transcription_error' 
-                                                 for section in page.get('body', [])))
-                    transcript['successful_pages'] = successful_pages
-                    transcript['last_updated'] = datetime.now().isoformat()
+                    if result.transcription_notes == "Failed to parse structured response":
+                        if page_num not in transcript['failed_pages']:
+                            transcript['failed_pages'].append(page_num)
+                    else:
+                        if page_num in transcript['failed_pages']:
+                            transcript['failed_pages'].remove(page_num)
+                        transcript['successful_pages'] += 1
                     
                     with open(transcript_path, 'w', encoding='utf-8') as f:
                         json.dump(transcript, f, indent=2, ensure_ascii=False)
