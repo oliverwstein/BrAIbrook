@@ -31,7 +31,6 @@ class ManuscriptCatalogue:
         self.manuscript_listings: Dict[str, Dict] = {}
         self._load_manuscript_listings()
         
-    
     def get_manuscript_listings(self) -> Dict[str, Dict]:
         """Get complete information for all manuscripts in the catalogue."""
         # Update status for any manuscripts being transcribed
@@ -107,6 +106,37 @@ class ManuscriptCatalogue:
             'error': job_status.error
         }
     
+    def request_transcription(self, manuscript_id: str, notes: str = "", priority: int = 1) -> bool:
+        """Request transcription of a manuscript."""
+        if not self.manuscript_exists(manuscript_id):
+            raise ValueError(f"Manuscript {manuscript_id} not found")
+            
+        return self.transcription_manager.request_transcription(
+            manuscript_id=manuscript_id,
+            notes=notes,
+            priority=priority
+        )
+
+    def get_pending_requests(self) -> List[Dict]:
+        """Get list of pending transcription requests."""
+        list_of_transcription_requests = self.transcription_manager.get_pending_requests()
+        requests = []
+        for request in list_of_transcription_requests:
+            requests.append({
+                "manuscript_id": request.manuscript_id,
+                "requested_at": request.requested_at.isoformat(),
+                "notes": request.notes,
+                "priority": request.priority})
+        return requests
+    
+    def approve_request(self, manuscript_id: str) -> bool:
+        """Approve a pending transcription request."""
+        return self.transcription_manager.approve_request(manuscript_id)
+
+    def reject_request(self, manuscript_id: str) -> bool:
+        """Reject a pending transcription request."""
+        return self.transcription_manager.reject_request(manuscript_id)
+
     def start_transcription(self, manuscript_id: str, priority: int = 1) -> bool:
         """Start transcription of a manuscript."""
         if not self.manuscript_exists(manuscript_id):
