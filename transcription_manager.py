@@ -10,6 +10,8 @@ import threading
 import time
 import asyncio
 
+from pydantic import BaseModel
+
 from transcriber import PageTranscriber
 
 # Configure logging
@@ -29,7 +31,16 @@ class TranscriptionStatus(Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    REQUESTED = "requested"
 
+@dataclass
+class TranscriptionRequest:
+    """Represents a pending transcription request."""
+    manuscript_id: str
+    requested_at: datetime
+    notes: str = ""
+    priority: int = 1
+    
 @dataclass
 class TranscriptionJob:
     manuscript_id: str
@@ -41,6 +52,7 @@ class TranscriptionJob:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
+    request: Optional[TranscriptionRequest] = None
 
     def __post_init__(self):
         if self.failed_pages is None:
@@ -70,6 +82,7 @@ class TranscriptionQueueManager:
         self.job_queue = queue.PriorityQueue()
         self.active_jobs: Dict[str, TranscriptionJob] = {}
         self.completed_jobs: Dict[str, TranscriptionJob] = {}
+        self.pending_requests: Dict[str, TranscriptionRequest] = {}
         self.worker_threads: List[threading.Thread] = []
         self.should_stop = threading.Event()
         self.jobs_lock = threading.Lock()
@@ -84,7 +97,80 @@ class TranscriptionQueueManager:
             self.worker_threads.append(worker)
             worker.start()
 
-    def queue_manuscript(self, manuscript_id: str, priority: int = 1) -> bool:
+    def request_transcription(self, manuscript_id: str, notes: str = "", priority: int = 1) -> bool:
+        """Create a new transcription request."""
+        with self.jobs_lock:
+            if manuscript_id in self.pending_requests:
+                return False
+            
+            request = TranscriptionRequest(
+                manuscript_id=manuscript_id,
+                requested_at=datetime.now(),
+                notes=notes,
+                priority=priority
+            )
+            self.pending_requests[manuscript_id] = request
+            return True
+    
+    def get_pending_requests(self) -> List[TranscriptionRequest]:
+        """Get all pending transcription requests."""
+        return list(self.pending_requests.values())
+    
+    def approve_request(self, manuscript_id: str) -> bool:
+        """Approve a pending transcription request."""
+        with self.jobs_lock:
+            request = self.pending_requests.pop(manuscript_id, None)
+            if not request:
+                return False
+            
+            # Create new job
+            try:
+                # First verify the manuscript still exists/is valid
+                manuscript_dir = self.catalogue_dir / manuscript_id
+                if not manuscript_dir.exists():
+                    logger.error(f"Manuscript directory not found: {manuscript_id}")
+                    return False
+
+                # Count total pages
+                image_dir = manuscript_dir / 'images'
+                if not image_dir.exists():
+                    logger.error(f"Images directory not found for manuscript: {manuscript_id}")
+                    return False
+                    
+                image_files = [f for f in image_dir.iterdir() 
+                            if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}]
+                total_pages = len(image_files)
+                
+                if total_pages == 0:
+                    logger.error(f"No image files found for manuscript: {manuscript_id}")
+                    return False
+
+                # Create and queue the job
+                job = TranscriptionJob(
+                    manuscript_id=manuscript_id,
+                    priority=request.priority,
+                    total_pages=total_pages,
+                    request=request  # Keep reference to original request
+                )
+                self.active_jobs[manuscript_id] = job
+                self.job_queue.put(job)
+                
+                logger.info(f"Successfully queued approved request for {manuscript_id} with {total_pages} pages")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error queueing approved request for {manuscript_id}: {str(e)}", exc_info=True)
+                return False
+    
+    def reject_request(self, manuscript_id: str) -> bool:
+        """Reject a pending transcription request."""
+        with self.jobs_lock:
+            if manuscript_id not in self.pending_requests:
+                return False
+            self.pending_requests.pop(manuscript_id)
+            return True
+        
+    def queue_manuscript(self, manuscript_id: str, priority: int = 1, request: Optional[TranscriptionRequest] = None) -> bool:
         """Add a manuscript to the transcription queue.
         
         Args:
@@ -124,7 +210,8 @@ class TranscriptionQueueManager:
                 job = TranscriptionJob(
                     manuscript_id=manuscript_id,
                     priority=priority,
-                    total_pages=total_pages
+                    total_pages=total_pages, 
+                    request=request
                 )
                 self.active_jobs[manuscript_id] = job
                 self.job_queue.put(job)
@@ -137,9 +224,23 @@ class TranscriptionQueueManager:
                 return False
 
     def get_job_status(self, manuscript_id: str) -> Optional[TranscriptionJob]:
-        """Get current status of a transcription job."""
+        """Get current status of a transcription job or request."""
+        # First check active and completed jobs
         status = (self.active_jobs.get(manuscript_id) or 
                  self.completed_jobs.get(manuscript_id))
+        
+        # If no job found, check if there's a pending request
+        if not status and manuscript_id in self.pending_requests:
+            request = self.pending_requests[manuscript_id]
+            # Create a job object to represent the request status
+            status = TranscriptionJob(
+                manuscript_id=manuscript_id,
+                priority=request.priority,
+                total_pages=0,  # We don't know the total pages yet
+                status=TranscriptionStatus.REQUESTED,
+                request=request
+            )
+        
         if status:
             if status.status.value != "in_progress":
                 logger.debug(f"Retrieved status for {manuscript_id}: {status.status.value}")
