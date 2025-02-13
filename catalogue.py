@@ -1,352 +1,124 @@
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, AsyncIterator, Any
-import logging
-import asyncio
+from typing import Dict, List, Optional
 import json
+import logging
 
-from transcriber import PageTranscriber
-from processor import ManuscriptProcessor
+from transcription_manager import TranscriptionQueueManager
 
 logger = logging.getLogger(__name__)
 
-class CatalogueEventType(Enum):
-    # Transcription events
-    TRANSCRIPTION_STARTED = "transcription_started"
-    TRANSCRIPTION_PAGE_COMPLETE = "transcription_page_complete"
-    TRANSCRIPTION_COMPLETE = "transcription_complete"
-    TRANSCRIPTION_ERROR = "transcription_error"
-    
-    # Processing status events
-    PROCESSING_STARTED = "processing_started"
-    PROCESSING_COMPLETE = "processing_complete"
-    PROCESSING_ERROR = "processing_error"
-    
-    # General events
-    METADATA_UPDATED = "metadata_updated"
-    ERROR_OCCURRED = "error_occurred"
-
-@dataclass
-class CatalogueEvent:
-    type: CatalogueEventType
-    manuscript_id: str
-    timestamp: datetime
-    data: Dict[str, Any]
-    error: Optional[str] = None
-
 class ManuscriptCatalogue:
     """
-    Central manager for manuscript processing and access.
-    Coordinates between transcription and cataloguing components while
-    managing state through events.
+    Central manager for manuscript access and transcription coordination.
+    Maintains manuscript listings and coordinates transcription processes.
     """
     
     def __init__(self, catalogue_dir: str = "data/catalogue"):
-        """Initialize the manuscript catalogue with components and event system."""
+        """Initialize the manuscript catalogue with components."""
         self.catalogue_dir = Path(catalogue_dir)
         if not self.catalogue_dir.exists():
             raise FileNotFoundError(f"Catalogue directory not found: {self.catalogue_dir}")
-        
-        # Initialize components
-        self.transcriber = PageTranscriber()
-        self.processor = ManuscriptProcessor()
-        
-        # Event and state management
-        self._event_handlers: List[Callable[[CatalogueEvent], None]] = []
-        self._active_processes: Dict[str, Dict] = {}
+        self.status_log: List[Dict] = []
+        # Initialize transcription manager
+        self.transcription_manager = TranscriptionQueueManager(
+            catalogue_dir=self.catalogue_dir,
+            num_workers=6
+        )
         
         # Initialize manuscript listings
         self.manuscript_listings: Dict[str, Dict] = {}
         self._load_manuscript_listings()
-    
-    def subscribe(self, handler: Callable[[CatalogueEvent], None]):
-        """Subscribe to catalogue events."""
-        self._event_handlers.append(handler)
-    
-    def unsubscribe(self, handler: Callable[[CatalogueEvent], None]):
-        """Remove a subscription."""
-        if handler in self._event_handlers:
-            self._event_handlers.remove(handler)
-    
-    def _emit_event(self, event: CatalogueEvent):
-        """Emit an event to all subscribers."""
-        logger.debug(f"Emitting event: {event}")
-        for handler in self._event_handlers:
-            try:
-                handler(event)
-            except Exception as e:
-                logger.error(f"Error in event handler: {e}")
-    
-    def _load_manuscript_listings(self):
-        """Load all manuscript listings into memory."""
-        self.manuscript_listings.clear()
-        for manuscript_dir in self.catalogue_dir.iterdir():
-            if not manuscript_dir.is_dir():
-                continue
-                
-            try:
-                # Read metadata
-                metadata_path = manuscript_dir / 'standard_metadata.json'
-                if not metadata_path.exists():
-                    continue
-                    
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
-                    
-                manuscript_id = manuscript_dir.name
-                
-                # Get transcription status
-                status = self.get_transcription_status(manuscript_id)
-                
-                self.manuscript_listings[manuscript_id] = {
-                    'manuscript_id': manuscript_id,
-                    'metadata': metadata,
-                    'total_pages': self.get_page_count(manuscript_id),
-                    **status
-                }
-                
-            except Exception as e:
-                logger.error(f"Error loading manuscript {manuscript_dir.name}: {e}")
-                continue
-
-    def get_manuscript_listings(self) -> Dict[str, Dict]:
-        """
-        Get complete information for all manuscripts in the catalogue.
         
-        Returns:
-            Dict mapping manuscript_id to manuscript information containing:
-            - Full metadata from standard_metadata.json
-            - manuscript_id
-            - total_pages (from image count)
-            - transcription_status (not_started, in_progress, complete)
-            - transcribed_pages (count of successfully transcribed pages)
-            - last_updated (timestamp of last modification)
-        """
-        return self.manuscript_listings.copy()  # Return a copy to prevent external modification
+    
+    def get_manuscript_listings(self) -> Dict[str, Dict]:
+        """Get complete information for all manuscripts in the catalogue."""
+        # Update status for any manuscripts being transcribed
+        for manuscript_id in self.manuscript_listings:
+            job_status = self.transcription_manager.get_job_status(manuscript_id)
+            if job_status:
+                self._refresh_manuscript(manuscript_id)
+                
+        return self.manuscript_listings.copy()
 
-    def refresh_manuscript(self, manuscript_id: str) -> None:
-        """
-        Refresh the listing for a specific manuscript.
-        Should be called after any operation that modifies the manuscript.
-        """
+    def get_manuscript(self, manuscript_id: str) -> Optional[Dict]:
+        """Get complete information for a specific manuscript."""
         if not self.manuscript_exists(manuscript_id):
-            return
-            
-        try:
-            metadata_path = self.catalogue_dir / manuscript_id / 'standard_metadata.json'
-            if not metadata_path.exists():
-                self.manuscript_listings.pop(manuscript_id, None)
-                return
-                
-            with open(metadata_path, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
-                
-            status = self.get_transcription_status(manuscript_id)
-            
-            self.manuscript_listings[manuscript_id] = {
-                'manuscript_id': manuscript_id,
-                'metadata': metadata,
-                'total_pages': self.get_page_count(manuscript_id),
-                **status
-            }
-            
-            self._emit_event(CatalogueEvent(
-                type=CatalogueEventType.METADATA_UPDATED,
-                manuscript_id=manuscript_id,
-                timestamp=datetime.now(),
-                data=self.manuscript_listings[manuscript_id]
-            ))
-            
-        except Exception as e:
-            logger.error(f"Error refreshing manuscript {manuscript_id}: {e}")
-            self.manuscript_listings.pop(manuscript_id, None)
-            
+            return None
+        
+        manuscript = {}
+        # Get basic manuscript info
+        manuscript['metadata'] = self.manuscript_listings[manuscript_id].copy()
+        
+        # Add page data if available
+        transcript_path = self.catalogue_dir / manuscript_id / 'transcript.json'
+        if transcript_path.exists():
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                transcript = json.load(f)
+                pages = {}
+                for page_num, transcription in transcript.get('pages', {}).items():
+                    pages[page_num] = {
+                        'page_number': int(page_num),
+                        'transcription': transcription
+                    }
+                manuscript['pages'] = pages
+        
+        return manuscript
+
     def manuscript_exists(self, manuscript_id: str) -> bool:
         """Check if a manuscript exists in the catalogue."""
         if manuscript_id not in self.manuscript_listings:
             # Do a filesystem check and refresh if found
             manuscript_dir = self.catalogue_dir / manuscript_id
             if manuscript_dir.exists() and manuscript_dir.is_dir():
-                self.refresh_manuscript(manuscript_id)
+                self._refresh_manuscript(manuscript_id)
                 return True
             return False
         return True
     
     def get_transcription_status(self, manuscript_id: str) -> Dict:
-        """
-        Get current transcription status for a manuscript.
+        """Get current transcription status for a manuscript."""
+        # Don't check manuscript_exists since that can cause recursion
         
-        Returns:
-            Dictionary with status information including:
-            - current state (not_started, in_progress, complete)
-            - progress information if in_progress
-            - error information if failed
-            - transcribed_pages count
-            - last_updated timestamp
-        """
-        # Check active processes first
-        if manuscript_id in self._active_processes:
-            return {
-                'status': 'in_progress',
-                **self._active_processes[manuscript_id]
-            }
+        job_status = self.transcription_manager.get_job_status(manuscript_id)
+        if not job_status:
+            # Check if we have any transcribed pages
+            transcript_path = self.catalogue_dir / manuscript_id / 'transcript.json'
+            if transcript_path.exists():
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    transcript = json.load(f)
+                    return {
+                        'status': 'completed' if len(transcript.get('pages', {})) == transcript.get('total_pages', 0) else 'partial',
+                        'transcribed_pages': len(transcript.get('pages', {})),
+                        'failed_pages': transcript.get('failed_pages', []),
+                        'total_pages': transcript.get('total_pages', 0),
+                        'last_updated': transcript.get('last_updated')
+                    }
+            return {'status': 'not_started'}
             
-        # Check transcription file
-        transcript_path = self.catalogue_dir / manuscript_id / 'transcript.json'
-        if not transcript_path.exists():
-            return {
-                'status': 'not_started',
-                'transcribed_pages': 0
-            }
-            
-        try:
-            with open(transcript_path, 'r', encoding='utf-8') as f:
-                transcript = json.load(f)
-                
-            total_pages = self.get_page_count(manuscript_id)
-            transcribed_pages = transcript.get('successful_pages', 0)
-            
-            return {
-                'status': 'complete' if transcribed_pages == total_pages else 'partial',
-                'transcribed_pages': transcribed_pages,
-                'total_pages': total_pages,
-                'last_updated': transcript.get('last_updated')
-            }
-            
-        except Exception as e:
-            logger.error(f"Error reading transcript for {manuscript_id}: {e}")
-            return {
-                'status': 'error',
-                'error': str(e)
-            }
+        return {
+            'status': job_status.status.value,
+            'transcribed_pages': job_status.completed_pages,
+            'failed_pages': job_status.failed_pages,
+            'total_pages': job_status.total_pages,
+            'started_at': job_status.started_at.isoformat() if job_status.started_at else None,
+            'completed_at': job_status.completed_at.isoformat() if job_status.completed_at else None,
+            'error': job_status.error
+        }
     
-    async def transcribe_manuscript(self, manuscript_id: str, notes: Optional[str] = None) -> None:
-        """
-        Transcribe all pages in a manuscript.
-        
-        Args:
-            manuscript_id: Unique identifier for the manuscript
-            notes: Optional notes to guide transcription
-        """
+    def start_transcription(self, manuscript_id: str, priority: int = 1) -> bool:
+        """Start transcription of a manuscript."""
         if not self.manuscript_exists(manuscript_id):
             raise ValueError(f"Manuscript {manuscript_id} not found")
             
-        if manuscript_id in self._active_processes:
-            raise RuntimeError(f"Manuscript {manuscript_id} is already being processed")
-        
-        try:
-            self._active_processes[manuscript_id] = {
-                'type': 'transcription',
-                'started_at': datetime.now().isoformat(),
-                'current_page': 0,
-                'completed_pages': 0
-            }
-            
-            total_pages = self.get_page_count(manuscript_id)
-            
-            self._emit_event(CatalogueEvent(
-                type=CatalogueEventType.TRANSCRIPTION_STARTED,
-                manuscript_id=manuscript_id,
-                timestamp=datetime.now(),
-                data={'total_pages': total_pages}
-            ))
-            
-            for page_num in range(1, total_pages + 1):
-                self._active_processes[manuscript_id]['current_page'] = page_num
-                
-                try:
-                    result = await self.transcriber.transcribe_page(
-                        str(self.catalogue_dir / manuscript_id),
-                        page_num,
-                        notes
-                    )
-                    
-                    self._active_processes[manuscript_id]['completed_pages'] += 1
-                    
-                    self._emit_event(CatalogueEvent(
-                        type=CatalogueEventType.TRANSCRIPTION_PAGE_COMPLETE,
-                        manuscript_id=manuscript_id,
-                        timestamp=datetime.now(),
-                        data={
-                            'page_number': page_num,
-                            'total_pages': total_pages,
-                            'result': result
-                        }
-                    ))
-                    
-                except Exception as e:
-                    self._emit_event(CatalogueEvent(
-                        type=CatalogueEventType.TRANSCRIPTION_ERROR,
-                        manuscript_id=manuscript_id,
-                        timestamp=datetime.now(),
-                        data={'page_number': page_num},
-                        error=str(e)
-                    ))
-                    
-            self._emit_event(CatalogueEvent(
-                type=CatalogueEventType.TRANSCRIPTION_COMPLETE,
-                manuscript_id=manuscript_id,
-                timestamp=datetime.now(),
-                data={'total_pages': total_pages}
-            ))
-            
-        except Exception as e:
-            self._emit_event(CatalogueEvent(
-                type=CatalogueEventType.ERROR_OCCURRED,
-                manuscript_id=manuscript_id,
-                timestamp=datetime.now(),
-                error=str(e)
-            ))
-            
-        finally:
-            self._active_processes.pop(manuscript_id, None)
-    
-    async def transcribe_page(self, manuscript_id: str, page_number: int, 
-                            notes: Optional[str] = None) -> Dict:
-        """
-        Transcribe a single manuscript page.
-        
-        Args:
-            manuscript_id: Unique identifier for the manuscript
-            page_number: Page number to transcribe (1-based)
-            notes: Optional notes to guide transcription
-        """
-        if not self.manuscript_exists(manuscript_id):
-            raise ValueError(f"Manuscript {manuscript_id} not found")
-            
-        total_pages = self.get_page_count(manuscript_id)
-        if page_number < 1 or page_number > total_pages:
-            raise ValueError(f"Invalid page number {page_number}. Valid range: 1-{total_pages}")
-            
-        result = await self.transcriber.transcribe_page(
-            str(self.catalogue_dir / manuscript_id),
-            page_number,
-            notes
-        )
-        
-        self._emit_event(CatalogueEvent(
-            type=CatalogueEventType.TRANSCRIPTION_PAGE_COMPLETE,
-            manuscript_id=manuscript_id,
-            timestamp=datetime.now(),
-            data={
-                'page_number': page_number,
-                'total_pages': total_pages,
-                'result': result
-            }
-        ))
-        
-        return result
-    
+        success = self.transcription_manager.queue_manuscript(manuscript_id, priority)
+        if success:
+            self._refresh_manuscript(manuscript_id)
+        return success
+
     def get_transcription(self, manuscript_id: str, page_number: Optional[int] = None) -> Dict:
-        """
-        Get existing transcription data.
-        
-        Args:
-            manuscript_id: Unique identifier for the manuscript
-            page_number: Optional specific page number, if None returns all pages
-        """
+        """Get transcription data for manuscript pages."""
         transcript_path = self.catalogue_dir / manuscript_id / 'transcript.json'
         if not transcript_path.exists():
             return {}
@@ -355,10 +127,22 @@ class ManuscriptCatalogue:
             transcript = json.load(f)
             
         if page_number is not None:
-            return transcript.get('pages', {}).get(str(page_number), {})
-            
-        return transcript
-    
+            # Return single page data
+            transcription = transcript.get('pages', {}).get(str(page_number), {})
+            return {
+                'page_number': page_number,
+                'transcription': transcription if transcription else None
+            }
+        
+        # Return all pages
+        pages = {}
+        for page_num, transcription in transcript.get('pages', {}).items():
+            pages[page_num] = {
+                'page_number': int(page_num),
+                'transcription': transcription
+            }
+        return pages
+
     def get_image_path(self, manuscript_id: str, page_number: int) -> Path:
         """Get filesystem path to page image."""
         image_dir = self.catalogue_dir / manuscript_id / 'images'
@@ -377,13 +161,8 @@ class ManuscriptCatalogue:
         image_dir = self.catalogue_dir / manuscript_id / 'images'
         return len(list(image_dir.iterdir()))
     
-    def validate_manuscript_structure(self, manuscript_id: str) -> List[str]:
-        """
-        Validate manuscript directory structure and required files.
-        
-        Returns:
-            List of validation issues found, empty if valid
-        """
+    def validate_manuscript(self, manuscript_id: str) -> List[str]:
+        """Validate manuscript directory structure and required files."""
         issues = []
         manuscript_dir = self.catalogue_dir / manuscript_id
         
@@ -410,3 +189,90 @@ class ManuscriptCatalogue:
                 issues.append("No image files found")
                 
         return issues
+
+    def _refresh_manuscript(self, manuscript_id: str) -> None:
+        """Refresh manuscript listing after changes."""
+        try:
+            metadata_path = self.catalogue_dir / manuscript_id / 'standard_metadata.json'
+            if not metadata_path.exists():
+                self.manuscript_listings.pop(manuscript_id, None)
+                return
+                
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+                
+            # Get status from queue manager first to avoid recursion
+            status = {'status': 'not_started'}
+            job_status = self.transcription_manager.get_job_status(manuscript_id)
+            if job_status:
+                status = {
+                    'status': job_status.status.value,
+                    'transcribed_pages': job_status.completed_pages,
+                    'failed_pages': job_status.failed_pages,
+                    'total_pages': job_status.total_pages,
+                    'started_at': job_status.started_at.isoformat() if job_status.started_at else None,
+                    'completed_at': job_status.completed_at.isoformat() if job_status.completed_at else None,
+                    'error': job_status.error
+                }
+            else:
+                # Check transcript file directly
+                transcript_path = self.catalogue_dir / manuscript_id / 'transcript.json'
+                if transcript_path.exists():
+                    with open(transcript_path, 'r', encoding='utf-8') as f:
+                        transcript = json.load(f)
+                        status = {
+                            'status': 'completed' if len(transcript.get('pages', {})) == transcript.get('total_pages', 0) else 'partial',
+                            'transcribed_pages': len(transcript.get('pages', {})),
+                            'failed_pages': transcript.get('failed_pages', []),
+                            'total_pages': transcript.get('total_pages', 0),
+                            'last_updated': transcript.get('last_updated')
+                        }
+            
+            self.manuscript_listings[manuscript_id] = {
+                'id': manuscript_id,
+                'total_pages': self.get_page_count(manuscript_id),
+                **metadata,
+                'transcription_status': status
+            }
+            log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'manuscript_id': manuscript_id,
+                'status': status
+            }
+            self.status_log.append(log_entry)
+            
+        except Exception as e:
+            logger.error(f"Error refreshing manuscript {manuscript_id}: {e}")
+            self.manuscript_listings.pop(manuscript_id, None)
+
+    def _load_manuscript_listings(self) -> None:
+        """Load all manuscript listings into memory."""
+        self.manuscript_listings.clear()
+        for manuscript_dir in self.catalogue_dir.iterdir():
+            if not manuscript_dir.is_dir():
+                continue
+                
+            try:
+                manuscript_id = manuscript_dir.name
+                self._refresh_manuscript(manuscript_id)
+                
+            except Exception as e:
+                logger.error(f"Error loading manuscript {manuscript_dir.name}: {e}")
+                continue
+
+    def get_recent_status_updates(self, since: Optional[datetime] = None) -> List[Dict]:
+        """Get recent status updates, optionally filtered by timestamp."""
+        if since:
+            return [
+                entry for entry in self.status_log 
+                if datetime.fromisoformat(entry['timestamp']) > since
+            ]
+        return self.status_log.copy()
+
+    def get_manuscript_status_history(self, manuscript_id: str, since: Optional[datetime] = None) -> List[Dict]:
+        """Get status history for a specific manuscript."""
+        return [
+            entry for entry in self.status_log 
+            if entry['manuscript_id'] == manuscript_id
+            and (not since or datetime.fromisoformat(entry['timestamp']) > since)
+        ]
