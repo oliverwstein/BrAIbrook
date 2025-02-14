@@ -35,6 +35,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 class TranscriptionRequestBody(BaseModel):
     notes: str = ""
     priority: int = 1
+    pages: str = ""  # Optional string like "1,2,3" or "1-5" or empty for all pages
+
 
 # Configure logging
 logging.basicConfig(
@@ -414,12 +416,31 @@ async def reject_transcription_request(
 @app.post("/manuscripts/{manuscript_id}/transcribe")
 async def transcribe_manuscript(
     manuscript_id: str, 
-    request: TranscriptionRequestBody,  # Updated name here
-    token: Optional[str] = Cookie(None, alias="auth_token")  # Get token directly
+    request: TranscriptionRequestBody,
+    token: Optional[str] = Cookie(None, alias="auth_token")
 ):
     """Start or request transcription of a manuscript."""
     try:
-        # Check admin status for this specific request
+        # Parse pages string if provided
+        pages_to_process = None
+        if request.pages.strip():
+            try:
+                # Handle both comma-separated list and ranges
+                pages = []
+                for part in request.pages.split(','):
+                    if '-' in part:
+                        start, end = map(int, part.split('-'))
+                        pages.extend(range(start, end + 1))
+                    else:
+                        pages.append(int(part))
+                pages_to_process = sorted(list(set(pages)))  # Remove duplicates and sort
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Invalid page format. Use comma-separated numbers or ranges (e.g., '1,2,3' or '1-5')"
+                )
+
+        # Check admin status
         is_admin = False
         if token:
             try:
@@ -428,34 +449,39 @@ async def transcribe_manuscript(
             except JWTError:
                 pass
 
-        logger.info(f"Received transcription request for {manuscript_id} (admin: {is_admin})")
+        # Log the request
+        page_info = f" (pages {request.pages})" if request.pages.strip() else " (all pages)"
+        logger.info(
+            f"Received transcription request for {manuscript_id}{page_info} "
+            f"(admin: {is_admin}, priority: {request.priority})"
+        )
         
         if not is_admin:
-            logger.info("Processing non-admin request")
-            # For non-admins, create a transcription request
+            logger.info(f"Processing non-admin request for {manuscript_id}")
             try:
                 success = catalogue.request_transcription(
                     manuscript_id=manuscript_id,
                     notes=request.notes,
-                    priority=request.priority
+                    priority=request.priority,
+                    pages=pages_to_process
                 )
-                logger.info(f"Request transcription result: {success}")
+                logger.info(f"Request transcription result for {manuscript_id}: {success}")
             except Exception as e:
-                logger.error(f"Error in request_transcription: {str(e)}")
+                logger.error(f"Error in request_transcription for {manuscript_id}: {str(e)}")
                 raise
             
             if success:
                 # Get status and notify clients about the request
                 try:
                     status = catalogue.get_transcription_status(manuscript_id)
-                    logger.info(f"Got status for requested manuscript: {status}")
+                    logger.info(f"Got status for requested manuscript {manuscript_id}: {status}")
                     await manager.broadcast(json.dumps({
                         'type': 'transcription_update',
                         'manuscript_id': manuscript_id,
                         'data': status
                     }))
                 except Exception as e:
-                    logger.error(f"Error broadcasting status: {str(e)}")
+                    logger.error(f"Error broadcasting status for {manuscript_id}: {str(e)}")
                     raise
                 
                 return JSONResponse(
@@ -473,9 +499,12 @@ async def transcribe_manuscript(
                 )
             
         # For admins, proceed with direct transcription
+        logger.info(f"Processing admin transcription request for {manuscript_id}{page_info}")
         success = catalogue.start_transcription(
             manuscript_id=manuscript_id,
-            priority=request.priority
+            priority=request.priority,
+            pages=pages_to_process,
+            notes=request.notes  # Pass through the notes for admin transcriptions
         )
         
         if success:
@@ -490,16 +519,20 @@ async def transcribe_manuscript(
                 'data': status
             }))
             
+            logger.info(f"Successfully started transcription for {manuscript_id}{page_info}")
             return JSONResponse(content={
                 'status': 'started',
                 'manuscript_id': manuscript_id
             })
         else:
+            logger.warning(f"Transcription already in progress for {manuscript_id}")
             return JSONResponse(
                 content={'status': 'already_running'},
                 status_code=409
             )
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error handling transcription for {manuscript_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to process transcription")
