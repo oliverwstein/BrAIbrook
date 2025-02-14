@@ -86,22 +86,24 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(f"Message received: {data}")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        
+
+# --- CORS Configuration ---
+# Use allow_origins=["*"] for development simplicity (but NOT for production!)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",  # Vite dev server
+        "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "http://localhost:4173",  # Vite preview
+        "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "http://localhost:8000",  # FastAPI server
+        "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "https://plenty-sloths-show.loca.lt"  # Your frontend localtunnel URL
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=3600,
 )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -185,6 +187,19 @@ async def startup_event():
     """Start background tasks when server starts."""
     asyncio.create_task(update_transcription_status())
 
+@app.get("/admin/status")
+async def check_admin_status(token: Optional[str] = Cookie(None, alias="auth_token")):
+    """Check current admin authentication status."""
+    if not token:
+        return JSONResponse(content={"is_admin": False})
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        is_admin = payload.get("is_admin", False)
+        return JSONResponse(content={"is_admin": is_admin})
+    except JWTError:
+        return JSONResponse(content={"is_admin": False})
+    
 @app.post("/admin/login")
 async def login(password: str = Form(...)):
     if password != ADMIN_PASSWORD:
