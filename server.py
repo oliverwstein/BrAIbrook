@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import asyncio
 from typing import Dict, List, Optional
-from fastapi import FastAPI, Form, HTTPException, WebSocket, WebSocketDisconnect, Depends, status, Cookie
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect, Depends, status, Cookie
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -100,7 +100,7 @@ app.add_middleware(
         "http://127.0.0.1:4173",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
-        "https://plenty-sloths-show.loca.lt"  # Your frontend localtunnel URL
+        "https://ley-star.loca.lt"  # Your frontend localtunnel URL
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -183,6 +183,13 @@ async def update_transcription_status():
             logger.error(f"Error updating transcription status: {e}")
             
         await asyncio.sleep(5)  # Update every 5 seconds
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    client_host = request.client.host
+    logger.info(f"Request from IP: {client_host}")
+    response = await call_next(request)
+    return response
 
 @app.on_event("startup")
 async def startup_event():
