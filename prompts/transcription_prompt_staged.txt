@@ -13,7 +13,7 @@ First, determine if it is a regular page of the manuscript, a cover/bookplate pa
 Each metadata field provides critical context for transcription:
 
 1. **Script and Language Context**
-   - Script type: Informs character forms and abbreviations
+   - Script type: Informs character forms and abbreviations.
    - Languages: Guides word recognition and expansion
    - Date range: Indicates likely script variations and conventions
    - Origin location: Suggests regional writing styles
@@ -59,7 +59,9 @@ Each metadata field provides critical context for transcription:
 Proceed through these systematic steps:
 
 1. **Initial Character-by-Character Transcription**
-   - Transcribe each character exactly as seen
+   - Transcribe each character based on its shape, 
+    determining the most likely characters given the script and language. 
+    Use characters and symbols appropriate to the script and language.
    - Use markup for uncertainty:
      * [abc] = uncertain reading
      * {{...}} = illegible
