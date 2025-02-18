@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime
+from enum import Enum
 import os
 import json
 import logging
@@ -10,6 +11,8 @@ from PIL import Image
 import asyncio
 import google.generativeai as genai
 from dataclasses import dataclass
+
+from storage import CloudStorageAdapter, LocalStorageAdapter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,176 +50,45 @@ class TranscriptionResult:
     language: str = ""
     transcription_notes: str = ""
 
-def create_robust_pattern(field_name: str) -> str:
-    """Creates a robust pattern for extracting JSON fields with proper Unicode support."""
-    return fr'"{field_name}"\s*:\s*"((?:\\.|[^"\\])*?)"'
 
-def extract_array_field(text: str, field_name: str) -> List[str]:
-    """Extracts an array field from text, handling various formats."""
-    array_pattern = fr'"{field_name}"\s*:\s*\[(.*?)\]'
-    match = re.search(array_pattern, text, re.DOTALL)
-    if match:
-        items = re.findall(r'["\']((?:\\.|[^"\'\\])*?)["\']', match.group(1))
-        return [item.strip() for item in items if item.strip()]
-    return []
+@dataclass
+class TranscriptionRequest:
+    """Represents a pending transcription request."""
+    manuscript_id: str
+    requested_at: datetime
+    notes: str = ""
+    priority: int = 1
+    pages: Optional[List[int]] = None
+    total_pages: int = 0  # Add this to track total pages in manuscript
+    
+class TaskStatus(Enum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REQUESTED = "requested"
 
-def extract_object_array(text: str, field_name: str, required_fields: List[str]) -> List[Dict]:
-    """Extracts an array of objects with specified required fields."""
-    array_pattern = fr'"{field_name}"\s*:\s*\[(.*?)\](?=\s*,\s*"|\s*}})'
-    match = re.search(array_pattern, text, re.DOTALL)
-    if not match:
-        return []
+@dataclass
+class TranscriptionJob:
+    manuscript_id: str
+    priority: int
+    total_pages: int
+    completed_pages: int = 0
+    failed_pages: List[int] = None
+    status: TaskStatus = TaskStatus.QUEUED
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+    request: Optional[TranscriptionRequest] = None
+    pages_to_process: Optional[List[int]] = None
 
-    array_text = match.group(1)
-    objects = []
-    
-    # Match individual objects in the array
-    object_matches = re.finditer(r'{(.*?)}', array_text, re.DOTALL)
-    
-    for obj_match in object_matches:
-        obj_text = obj_match.group(1)
-        extracted_obj = {}
-        
-        for field in required_fields:
-            field_match = re.search(create_robust_pattern(field), obj_text)
-            if field_match:
-                extracted_obj[field] = field_match.group(1)
-        
-        if all(field in extracted_obj for field in required_fields):
-            objects.append(extracted_obj)
-    
-    return objects
+    def __post_init__(self):
+        if self.failed_pages is None:
+            self.failed_pages = []
 
-def extract_json_from_response(text: str) -> Dict:
-    """Extracts structured transcription data from text response."""
-    # Remove code block markers if present
-    text = re.sub(r'^```(json)?\s*|\s*```\s*$', '', text, flags=re.MULTILINE)
-    
-    # Try standard JSON parsing first
-    try:
-        parsed = json.loads(text)
-        if validate_transcription_data(parsed):
-            return parsed
-    except json.JSONDecodeError:
-        logger.info("Direct JSON parsing failed, attempting field extraction")
-    
-    # Initialize empty result
-    result = {}
-    extraction_success = False
-    
-    try:
-        # Extract all possible content arrays
-        content_arrays = {
-            'body': ['name', 'text'],
-            'illustrations': ['location', 'description'],
-            'marginalia': ['location', 'text'],
-            'notes': ['type', 'text']
-        }
-        
-        for array_name, required_fields in content_arrays.items():
-            extracted = extract_object_array(text, array_name, required_fields)
-            if extracted:
-                result[array_name] = extracted
-                extraction_success = True
-        
-        # Extract required string fields
-        notes_match = re.search(create_robust_pattern('transcription_notes'), text)
-        if notes_match:
-            result['transcription_notes'] = notes_match.group(1)
-            extraction_success = True
-        else:
-            # transcription_notes is required - if missing, use fallback
-            logger.error("Failed to extract required transcription_notes")
-            return create_fallback_response(text)
-        
-        # Extract optional language field
-        language_match = re.search(create_robust_pattern('language'), text)
-        if language_match:
-            result['language'] = language_match.group(1)
-        else:
-            result['language'] = ""  # Empty string is valid for language
-        
-        # Ensure we have minimal valid content
-        if extraction_success and validate_transcription_data(result):
-            # Add empty lists for any missing content arrays
-            for array_name in content_arrays.keys():
-                if array_name not in result:
-                    result[array_name] = []
-            return result
-        
-        logger.error("Failed to extract sufficient transcription data")
-        return create_fallback_response(text)
-        
-    except Exception as e:
-        logger.error(f"Error during JSON extraction: {e}")
-        return create_fallback_response(text)
-    
-def validate_transcription_data(data: Dict) -> bool:
-    """
-    Validates only that the types are correct for any fields that exist.
-    Does not require any fields to be present or have specific subfields.
-    """
-    # Must be a dictionary
-    if not isinstance(data, dict):
-        return False
-    
-    # Validate body is a list of dictionaries if present
-    if 'body' in data:
-        if not isinstance(data['body'], list):
-            return False
-        for section in data['body']:
-            if not isinstance(section, dict):
-                return False
-    
-    # Validate illustrations is a list of dictionaries if present
-    if 'illustrations' in data:
-        if not isinstance(data['illustrations'], list):
-            return False
-        for item in data['illustrations']:
-            if not isinstance(item, dict):
-                return False
-    
-    # Validate marginalia is a list of dictionaries if present
-    if 'marginalia' in data:
-        if not isinstance(data['marginalia'], list):
-            return False
-        for item in data['marginalia']:
-            if not isinstance(item, dict):
-                return False
-    
-    # Validate notes is a list of dictionaries if present
-    if 'notes' in data:
-        if not isinstance(data['notes'], list):
-            return False
-        for item in data['notes']:
-            if not isinstance(item, dict):
-                return False
-    
-    # Validate language is a string if present
-    if 'language' in data:
-        if not isinstance(data['language'], str):
-            return False
-    
-    # Validate transcription_notes is a string if present
-    if 'transcription_notes' in data:
-        if not isinstance(data['transcription_notes'], str):
-            return False
-    
-    return True
-
-def create_fallback_response(text: str) -> Dict:
-    """Creates a basic valid response structure containing the original text."""
-    return {
-        'body': [{
-            'name': 'unstructured_content',
-            'text': text
-        }],
-        'illustrations': [],
-        'marginalia': [],
-        'notes': [],
-        'language': 'unknown',
-        'transcription_notes': 'Failed to parse structured response'
-    }
+    def __lt__(self, other):
+        # For PriorityQueue ordering
+        return self.priority < other.priority
 
 class PageTranscriber:
     def __init__(self, prompt_path: str = "prompts/transcription_prompt_staged.txt"):
@@ -224,6 +96,12 @@ class PageTranscriber:
         api_key = os.environ.get('GEMINI_API_KEY')
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable not found")
+        
+        # Initialize storage adapter based on environment
+        if os.getenv('ENVIRONMENT') == 'development':
+            self.storage = LocalStorageAdapter()
+        else:
+            self.storage = CloudStorageAdapter()
         
         with open(prompt_path, 'r', encoding='utf-8') as f:
             self.prompt_template = f.read()
@@ -241,7 +119,7 @@ class PageTranscriber:
     def _parse_transcription_response(self, response_text: str) -> TranscriptionResult:
         """Parse the model's response into a structured transcription result."""
         try:
-            data = extract_json_from_response(response_text)
+            data = _extract_json_from_response(response_text)
             
             # Convert body sections to TextSection tuples
             body = [TextSection(section['name'], section['text']) 
@@ -297,39 +175,26 @@ class PageTranscriber:
             'transcription_notes': result.transcription_notes
         }
 
-    async def transcribe_page(self, manuscript_dir: str, page_number: int, notes: str = "") -> TranscriptionResult:
+    async def transcribe_page(self, manuscript_id: str, page_number: int, notes: str = "") -> TranscriptionResult:
         """Transcribe a single manuscript page with context from adjacent pages."""
-        manuscript_path = Path(manuscript_dir)
         max_retries = 2
         retry_delay = 30  # seconds
         
         for attempt in range(max_retries + 1):  # +1 for initial attempt
             try:
-                # Load metadata
-                metadata_path = manuscript_path / 'standard_metadata.json'
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
+                # Get metadata and image using storage adapter
+                metadata = self.storage.get_metadata(manuscript_id)
+                image = self.storage.get_image(manuscript_id, page_number)
                 
-                # Get image files
-                image_dir = manuscript_path / 'images'
-                image_files = sorted([f for f in image_dir.iterdir() 
-                                    if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}])
-                
-                if not image_files:
-                    raise ValueError(f"No image files found in {image_dir}")
-                
-                if page_number < 1 or page_number > len(image_files):
-                    raise ValueError(f"Invalid page number {page_number}. Valid range: 1-{len(image_files)}")
-                
-                # Process the page
-                image = Image.open(image_files[page_number - 1])
+                # Format prompt with metadata
                 metadata_json = json.dumps(metadata, indent=2).replace("{", "{{").replace("}", "}}")
                 prompt = self.prompt_template.format(
                     metadata=metadata_json,
                     page_number=page_number,
-                    total_pages=len(image_files),
+                    total_pages=metadata['total_pages'],
                     notes=notes if notes else ""
                 )
+
                 if attempt > 0: #If it is not the first attempt
                     response = self.backup_model.generate_content(
                         [prompt, image],
@@ -392,6 +257,168 @@ class PageTranscriber:
             language="unknown",
             transcription_notes=f"Failed to get valid transcription after {max_retries + 1} attempts"
         )
+
+def _create_robust_pattern(field_name: str) -> str:
+    """Creates a robust pattern for extracting JSON fields with proper Unicode support."""
+    return fr'"{field_name}"\s*:\s*"((?:\\.|[^"\\])*?)"'
+
+def _extract_object_array(text: str, field_name: str, required_fields: List[str]) -> List[Dict]:
+    """Extracts an array of objects with specified required fields."""
+    array_pattern = fr'"{field_name}"\s*:\s*\[(.*?)\](?=\s*,\s*"|\s*}})'
+    match = re.search(array_pattern, text, re.DOTALL)
+    if not match:
+        return []
+
+    array_text = match.group(1)
+    objects = []
+    
+    # Match individual objects in the array
+    object_matches = re.finditer(r'{(.*?)}', array_text, re.DOTALL)
+    
+    for obj_match in object_matches:
+        obj_text = obj_match.group(1)
+        extracted_obj = {}
+        
+        for field in required_fields:
+            field_match = re.search(_create_robust_pattern(field), obj_text)
+            if field_match:
+                extracted_obj[field] = field_match.group(1)
+        
+        if all(field in extracted_obj for field in required_fields):
+            objects.append(extracted_obj)
+    
+    return objects
+
+def _extract_json_from_response(text: str) -> Dict:
+    """Extracts structured transcription data from text response."""
+    # Remove code block markers if present
+    text = re.sub(r'^```(json)?\s*|\s*```\s*$', '', text, flags=re.MULTILINE)
+    
+    # Try standard JSON parsing first
+    try:
+        parsed = json.loads(text)
+        if _validate_transcription_data(parsed):
+            return parsed
+    except json.JSONDecodeError:
+        logger.info("Direct JSON parsing failed, attempting field extraction")
+    
+    # Initialize empty result
+    result = {}
+    extraction_success = False
+    
+    try:
+        # Extract all possible content arrays
+        content_arrays = {
+            'body': ['name', 'text'],
+            'illustrations': ['location', 'description'],
+            'marginalia': ['location', 'text'],
+            'notes': ['type', 'text']
+        }
+        
+        for array_name, required_fields in content_arrays.items():
+            extracted = _extract_object_array(text, array_name, required_fields)
+            if extracted:
+                result[array_name] = extracted
+                extraction_success = True
+        
+        # Extract required string fields
+        notes_match = re.search(_create_robust_pattern('transcription_notes'), text)
+        if notes_match:
+            result['transcription_notes'] = notes_match.group(1)
+            extraction_success = True
+        else:
+            # transcription_notes is required - if missing, use fallback
+            logger.error("Failed to extract required transcription_notes")
+            return _create_fallback_response(text)
+        
+        # Extract optional language field
+        language_match = re.search(_create_robust_pattern('language'), text)
+        if language_match:
+            result['language'] = language_match.group(1)
+        else:
+            result['language'] = ""  # Empty string is valid for language
+        
+        # Ensure we have minimal valid content
+        if extraction_success and _validate_transcription_data(result):
+            # Add empty lists for any missing content arrays
+            for array_name in content_arrays.keys():
+                if array_name not in result:
+                    result[array_name] = []
+            return result
+        
+        logger.error("Failed to extract sufficient transcription data")
+        return _create_fallback_response(text)
+        
+    except Exception as e:
+        logger.error(f"Error during JSON extraction: {e}")
+        return _create_fallback_response(text)
+    
+def _validate_transcription_data(data: Dict) -> bool:
+    """
+    Validates only that the types are correct for any fields that exist.
+    Does not require any fields to be present or have specific subfields.
+    """
+    # Must be a dictionary
+    if not isinstance(data, dict):
+        return False
+    
+    # Validate body is a list of dictionaries if present
+    if 'body' in data:
+        if not isinstance(data['body'], list):
+            return False
+        for section in data['body']:
+            if not isinstance(section, dict):
+                return False
+    
+    # Validate illustrations is a list of dictionaries if present
+    if 'illustrations' in data:
+        if not isinstance(data['illustrations'], list):
+            return False
+        for item in data['illustrations']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate marginalia is a list of dictionaries if present
+    if 'marginalia' in data:
+        if not isinstance(data['marginalia'], list):
+            return False
+        for item in data['marginalia']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate notes is a list of dictionaries if present
+    if 'notes' in data:
+        if not isinstance(data['notes'], list):
+            return False
+        for item in data['notes']:
+            if not isinstance(item, dict):
+                return False
+    
+    # Validate language is a string if present
+    if 'language' in data:
+        if not isinstance(data['language'], str):
+            return False
+    
+    # Validate transcription_notes is a string if present
+    if 'transcription_notes' in data:
+        if not isinstance(data['transcription_notes'], str):
+            return False
+    
+    return True
+
+def _create_fallback_response(text: str) -> Dict:
+    """Creates a basic valid response structure containing the original text."""
+    return {
+        'body': [{
+            'name': 'unstructured_content',
+            'text': text
+        }],
+        'illustrations': [],
+        'marginalia': [],
+        'notes': [],
+        'language': 'unknown',
+        'transcription_notes': 'Failed to parse structured response'
+    }
 
 async def main():
     parser = argparse.ArgumentParser(description='Transcribe manuscript pages')
